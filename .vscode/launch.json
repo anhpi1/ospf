@@ -1,0 +1,35 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "OMNeT++ Debug (Cmdenv)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/clang-debug/${workspaceFolderBasename}_dbg",
+            "args": [
+                "-u", "Cmdenv",
+                "${workspaceFolder}/omnetpp.ini"
+            ],
+            "cwd": "${workspaceFolder}",
+            "initCommands": [
+                "settings set stop-disassembly-display never"
+            ],
+            "preLaunchTask": "omnetpp: build debug"
+        },
+        {
+            "name": "OMNeT++ Debug (Qtenv GUI)",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/out/clang-debug/${workspaceFolderBasename}_dbg",
+            "args": [
+                "-u", "Qtenv",
+                "${workspaceFolder}/omnetpp.ini"
+            ],
+            "cwd": "${workspaceFolder}",
+            "initCommands": [
+                "settings set stop-disassembly-display never"
+            ],
+            "preLaunchTask": "omnetpp: build debug"
+        }
+    ]
+}

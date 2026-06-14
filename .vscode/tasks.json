@@ -1,0 +1,79 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "omnetpp: build debug",
+            "type": "shell",
+            "command": "OPP_ROOT=$(dirname $(opp_configfilepath)) && source \"$OPP_ROOT/setenv\" -q && make MODE=debug",
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": ["relative", "${workspaceFolder}"],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "omnetpp: build release",
+            "type": "shell",
+            "command": "OPP_ROOT=$(dirname $(opp_configfilepath)) && source \"$OPP_ROOT/setenv\" -q && make MODE=release",
+            "group": "build",
+            "problemMatcher": {
+                "owner": "cpp",
+                "fileLocation": ["relative", "${workspaceFolder}"],
+                "pattern": {
+                    "regexp": "^(.*):(\\d+):(\\d+):\\s+(warning|error):\\s+(.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "message": 5
+                }
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "omnetpp: clean",
+            "type": "shell",
+            "command": "OPP_ROOT=$(dirname $(opp_configfilepath)) && source \"$OPP_ROOT/setenv\" -q && make clean",
+            "group": "build",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        },
+        {
+            "label": "omnetpp: opp_makemake",
+            "type": "shell",
+            "command": "OPP_ROOT=$(dirname $(opp_configfilepath)) && source \"$OPP_ROOT/setenv\" -q && opp_makemake -f",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": false,
+                "panel": "shared"
+            }
+        }
+    ]
+}

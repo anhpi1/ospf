@@ -1,0 +1,266 @@
+{
+	// OMNeT++ MSG Language Snippets
+	// Generated from OMNeT++ 6.4.0 MSG2 DTD
+
+	"Message": {
+		"prefix": ["message"],
+		"body": [
+			"message ${1:MessageName}",
+			"{",
+			"\t${2}",
+			"}"
+		],
+		"description": "Message definition"
+	},
+
+	"Packet": {
+		"prefix": ["packet"],
+		"body": [
+			"packet ${1:PacketName}",
+			"{",
+			"\t${2}",
+			"}"
+		],
+		"description": "Packet definition (extends cPacket)"
+	},
+
+	"Class": {
+		"prefix": ["class"],
+		"body": [
+			"class ${1:ClassName}",
+			"{",
+			"\t${2}",
+			"}"
+		],
+		"description": "Class definition"
+	},
+
+	"Class with extends": {
+		"prefix": ["class-extends"],
+		"body": [
+			"class ${1:DerivedClass} extends ${2:BaseClass}",
+			"{",
+			"\t${3}",
+			"}"
+		],
+		"description": "Class definition with inheritance"
+	},
+
+	"Struct": {
+		"prefix": ["struct"],
+		"body": [
+			"struct ${1:StructName}",
+			"{",
+			"\t${2}",
+			"}"
+		],
+		"description": "Struct definition"
+	},
+
+	"Enum": {
+		"prefix": ["enum"],
+		"body": [
+			"enum ${1:EnumName}",
+			"{",
+			"\t${2:VALUE1}",
+			"\t${3:VALUE2}",
+			"\t${4:VALUE3}",
+			"}"
+		],
+		"description": "Enum definition"
+	},
+
+	"Int field": {
+		"prefix": ["int"],
+		"body": ["int ${1:fieldName}${2: = default($3)};"],
+		"description": "Integer field"
+	},
+
+	"Double field": {
+		"prefix": ["double"],
+		"body": ["double ${1:fieldName}${2: = default($3)};"],
+		"description": "Double field"
+	},
+
+	"String field": {
+		"prefix": ["string"],
+		"body": ["string ${1:fieldName}${2: = default(\"${3}\")};"],
+		"description": "String field"
+	},
+
+	"Bool field": {
+		"prefix": ["bool"],
+		"body": ["bool ${1:fieldName}${2: = default(${3:true})};"],
+		"description": "Boolean field"
+	},
+
+	"Simtime field": {
+		"prefix": ["simtime_t"],
+		"body": ["simtime_t ${1:fieldName}${2: = default(${3:0s})};"],
+		"description": "Simulation time field"
+	},
+
+	"Long field": {
+		"prefix": ["long"],
+		"body": ["long ${1:fieldName}${2: = default($3)};"],
+		"description": "Long integer field"
+	},
+
+	"Message with fields": {
+		"prefix": ["message-fields"],
+		"body": [
+			"message ${1:MessageName}",
+			"{",
+			"\t${2:int} ${3:field1};",
+			"\t${4:double} ${5:field2};",
+			"\t${6:string} ${7:field3};",
+			"}"
+		],
+		"description": "Message with common field types"
+	},
+
+	"Packet with fields": {
+		"prefix": ["packet-fields"],
+		"body": [
+			"packet ${1:PacketName}",
+			"{",
+			"\t${2:int} ${3:field1};",
+			"\t${4:double} ${5:field2};",
+			"\t${6:string} ${7:field3};",
+			"}"
+		],
+		"description": "Packet with common field types"
+	},
+
+	"Field with @ property": {
+		"prefix": ["field-prop"],
+		"body": ["${1:int} ${2:fieldName} @${3:property}(${4:value});"],
+		"description": "Field with property annotation"
+	},
+
+	"@getter property": {
+		"prefix": ["@getter"],
+		"body": ["@getter(${1:getterMethod})"],
+		"description": "Custom getter property"
+	},
+
+	"@setter property": {
+		"prefix": ["@setter"],
+		"body": ["@setter(${1:setterMethod})"],
+		"description": "Custom setter property"
+	},
+
+	"@hint property": {
+		"prefix": ["@hint"],
+		"body": ["@hint(\"${1:description}\")"],
+		"description": "Hint property for field description"
+	},
+
+	"@editable property": {
+		"prefix": ["@editable"],
+		"body": ["@editable"],
+		"description": "Editable field in GUI"
+	},
+
+	"@readonly property": {
+		"prefix": ["@readonly"],
+		"body": ["@readonly"],
+		"description": "Read-only field"
+	},
+
+	"@group property": {
+		"prefix": ["@group"],
+		"body": ["@group(\"${1:groupName}\")"],
+		"description": "Field grouping property"
+	},
+
+	"@enum property": {
+		"prefix": ["@enum"],
+		"body": ["@enum(${1:EnumType})"],
+		"description": "Enum type property"
+	},
+
+	"@pattern property": {
+		"prefix": ["@pattern"],
+		"body": ["@pattern(\"${1:regex}\")"],
+		"description": "Validation pattern property"
+	},
+
+	"Cplusplus block (header)": {
+		"prefix": ["cplusplus-h"],
+		"body": [
+			"cplusplus(h) {{",
+			"\t${1:}",
+			"}}"
+		],
+		"description": "C++ header code block"
+	},
+
+	"Cplusplus block (implementation)": {
+		"prefix": ["cplusplus-cc"],
+		"body": [
+			"cplusplus(cc) {{",
+			"\t${1:}",
+			"}}"
+		],
+		"description": "C++ implementation code block"
+	},
+
+	"Namespace": {
+		"prefix": ["namespace"],
+		"body": ["namespace ${1:omnetpp};"],
+		"description": "Namespace declaration"
+	},
+
+	"Import": {
+		"prefix": ["import"],
+		"body": ["import ${1:inet.common.Protocol};"],
+		"description": "Import statement"
+	},
+
+	"Register_Enum": {
+		"prefix": ["Register_Enum"],
+		"body": ["Register_Enum(${1:EnumType}, (${2:VALUE1}, ${3:VALUE2}));"],
+		"description": "Register enum for descriptors"
+	},
+
+	"@customize property": {
+		"prefix": ["@customize"],
+		"body": ["@customize(${1:true})${2:};"],
+		"description": "Customize property for generated class"
+	},
+
+	"@existingClass property": {
+		"prefix": ["@existingClass"],
+		"body": ["@existingClass;"],
+		"description": "Existing class mapping"
+	},
+
+	"Field with all annotations": {
+		"prefix": ["field-annotated"],
+		"body": ["${1:int} ${2:fieldName} @getter(${3:getMethod}) @setter(${4:setMethod}) @group(\"${5:group}\") @hint(\"${6:description}\");"],
+		"description": "Field with getter, setter, group, hint"
+	},
+
+	"Message extending another": {
+		"prefix": ["message-extends"],
+		"body": [
+			"message ${1:DerivedMessage} extends ${2:BaseMessage}",
+			"{",
+			"\t${3}",
+			"}"
+		],
+		"description": "Message with inheritance"
+	},
+
+	"Packet extending another": {
+		"prefix": ["packet-extends"],
+		"body": [
+			"packet ${1:DerivedPacket} extends ${2:BasePacket}",
+			"{",
+			"\t${3}",
+			"}"
+		],
+		"description": "Packet with inheritance"
+	}
+}

@@ -1,0 +1,337 @@
+{
+	// OMNeT++ NED Language Snippets
+	// Generated from OMNeT++ 6.4.0 NED2 DTD
+
+	"Simple module": {
+		"prefix": ["simple"],
+		"body": [
+			"simple ${1:ModuleName}",
+			"{",
+			"\tparameters:",
+			"\t\t${2:@display(\"i=block/process\");}",
+			"\tgates:",
+			"\t\t${3:}",
+			"}"
+		],
+		"description": "Simple module definition"
+	},
+
+	"Simple module with inheritance": {
+		"prefix": ["simple-extends"],
+		"body": [
+			"simple ${1:DerivedModule} extends ${2:BaseModule}",
+			"{",
+			"\tparameters:",
+			"\t\t${3:@display(\"i=block/process\");}",
+			"\tgates:",
+			"\t\t${4:}",
+			"}"
+		],
+		"description": "Simple module that extends another"
+	},
+
+	"Compound module": {
+		"prefix": ["compound", "module"],
+		"body": [
+			"module ${1:ModuleName}",
+			"{",
+			"\tparameters:",
+			"\t\t${2:@display(\"i=block/cogwheel\");}",
+			"\tgates:",
+			"\t\t${3:}",
+			"\tsubmodules:",
+			"\t\t${4:}",
+			"\tconnections:",
+			"\t\t${5:}",
+			"}"
+		],
+		"description": "Compound module definition"
+	},
+
+	"Module interface": {
+		"prefix": ["moduleinterface", "module-interface"],
+		"body": [
+			"moduleinterface ${1:IModuleName}",
+			"{",
+			"\tparameters:",
+			"\t\t${3:@display(\"i=block/cogwheel\");}",
+			"\tgates:",
+			"\t\t${4:}",
+			"}"
+		],
+		"description": "Module interface definition"
+	},
+
+	"Channel": {
+		"prefix": ["channel"],
+		"body": [
+			"channel ${1:ChannelName}",
+			"{",
+			"\tparameters:",
+			"\t\t${2:@display(\"i=block/cogwheel\");}",
+			"}"
+		],
+		"description": "Channel definition"
+	},
+
+	"Channel with delay/datarate/ber": {
+		"prefix": ["channel-typed"],
+		"body": [
+			"channel ${1:ChannelName} extends ned.DatarateChannel",
+			"{",
+			"\tparameters:",
+			"\t\t${2:delay = ${3:100ms};}",
+			"\t\t${4:datarate = ${5:100Mbps};}",
+			"\t\t${6:ber = ${7:1e-8};}",
+			"}"
+		],
+		"description": "Channel extending DatarateChannel"
+	},
+
+	"Channel interface": {
+		"prefix": ["channelinterface", "channel-interface"],
+		"body": [
+			"channelinterface ${1:IChannelName}",
+			"{",
+			"\tparameters:",
+			"\t\t${2:}",
+			"}"
+		],
+		"description": "Channel interface definition"
+	},
+
+	"Network": {
+		"prefix": ["network"],
+		"body": [
+			"network ${1:NetworkName}",
+			"{",
+			"\tparameters:",
+			"\t\t${2:@display(\"i=block/cogwheel\");}",
+			"\tsubmodules:",
+			"\t\t${3:}",
+			"\tconnections:",
+			"\t\t${4:}",
+			"}"
+		],
+		"description": "Network definition"
+	},
+
+	"Input gate": {
+		"prefix": ["input", "in"],
+		"body": ["input ${1:gateName}${2:[]};"],
+		"description": "Input gate"
+	},
+
+	"Output gate": {
+		"prefix": ["output", "out"],
+		"body": ["output ${1:gateName}${2:[]};"],
+		"description": "Output gate"
+	},
+
+	"Inout gate": {
+		"prefix": ["inout"],
+		"body": ["inout ${1:gateName}${2:[]};"],
+		"description": "Bidirectional gate"
+	},
+
+	"Parameter (string)": {
+		"prefix": ["param-string"],
+		"body": ["${1:string} ${2:paramName}${3: = default($4)};"],
+		"description": "String parameter"
+	},
+
+	"Parameter (int)": {
+		"prefix": ["param-int"],
+		"body": ["${1:int} ${2:paramName}${3: = default($4)};"],
+		"description": "Integer parameter"
+	},
+
+	"Parameter (double)": {
+		"prefix": ["param-double"],
+		"body": ["${1:double} ${2:paramName}${3: = default($4)};"],
+		"description": "Double parameter"
+	},
+
+	"Parameter (bool)": {
+		"prefix": ["param-bool"],
+		"body": ["${1:bool} ${2:paramName}${3: = default($4)};"],
+		"description": "Boolean parameter"
+	},
+
+	"Parameter (xml)": {
+		"prefix": ["param-xml"],
+		"body": ["${1:xml} ${2:paramName}${3: = default($4)};"],
+		"description": "XML parameter"
+	},
+
+	"Parameter (object)": {
+		"prefix": ["param-object"],
+		"body": ["${1:object} ${2:paramName};"],
+		"description": "Object parameter"
+	},
+
+	"Volatile parameter": {
+		"prefix": ["param-volatile"],
+		"body": ["${1:volatile ${2:double} ${3:paramName} = default(${4});"],
+		"description": "Volatile parameter"
+	},
+
+	"Submodule": {
+		"prefix": ["submodule"],
+		"body": [
+			"${1:submoduleName}: ${2:ModuleType}",
+			"{",
+			"\tgates:",
+			"\t\t${3:}",
+			"\tparameters:",
+			"\t\t${4:}",
+			"}"
+		],
+		"description": "Submodule definition"
+	},
+
+	"Submodule with like": {
+		"prefix": ["submodule-like"],
+		"body": [
+			"${1:submoduleName}: ${2:ModuleType} like ${3:IModuleInterface}",
+			"{",
+			"\tgates:",
+			"\t\t${4:}",
+			"\tparameters:",
+			"\t\t${5:}",
+			"}"
+		],
+		"description": "Submodule with module interface binding"
+	},
+
+	"Connection (single)": {
+		"prefix": ["connect", "conn"],
+		"body": ["${1:srcMod}.${2:srcGate}${3:++} --> ${4:channel}.${5:chg} --> ${6:destMod}.${7:destGate}${8:++};"],
+		"description": "Point-to-point connection (uni-directional)"
+	},
+
+	"Connection (bidirectional)": {
+		"prefix": ["connect-bidi"],
+		"body": ["${1:srcMod}.${2:srcGate}${3:++} <--> ${4:channel} <--> ${5:destMod}.${6:destGate}${7:++};"],
+		"description": "Bidirectional connection"
+	},
+
+	"Connection (direct)": {
+		"prefix": ["connect-single"],
+		"body": ["${1:srcMod}.${2:srcGate}${3:++} --> ${4:destMod}.${5:destGate}${6:++};"],
+		"description": "Direct unidirectional connection (no channel)"
+	},
+
+	"Connection (inout to inout)": {
+		"prefix": ["connect-inout"],
+		"body": ["${1:srcMod}.${2:srcGate}${3:++} <--> ${4:destMod}.${5:destGate}${6:++};"],
+		"description": "Direct inout-to-inout connection"
+	},
+
+	"Connection with channel": {
+		"prefix": ["connect-channel"],
+		"body": ["${1:srcMod}.${2:srcGate}${3:++} --> ${4:channel} ${5:ChannelType} { ${6:} } --> ${7:destMod}.${8:destGate}${9:++};"],
+		"description": "Connection with inline channel"
+	},
+
+	"Connection group (for)": {
+		"prefix": ["for-connect", "connect-for"],
+		"body": [
+			"for ${1:i}=${2:0}..${3:N-1} {",
+			"\t${4:srcMod}[${1:i}].${5:srcGate}++ --> ${6:destMod}[${1:i}].${7:destGate}++;",
+			"}"
+		],
+		"description": "Connection loop for vector modules"
+	},
+
+	"@display property": {
+		"prefix": ["@display"],
+		"body": ["@display(\"${1:i=block/process}\");"],
+		"description": "Display property"
+	},
+
+	"@display with position": {
+		"prefix": ["@display-pos"],
+		"body": ["@display(\"p=${1:x},${2:y};i=block/process\");"],
+		"description": "Display property with position"
+	},
+
+	"@signal": {
+		"prefix": ["@signal"],
+		"body": ["@signal[${1:sigName}](type=${2:cObject});"],
+		"description": "Signal property"
+	},
+
+	"@statistic": {
+		"prefix": ["@statistic"],
+		"body": [
+			"@statistic[${1:statName}](title=\"${2:Statistics Title}\"; source=\"${3:source}\"; record=${4:last},${5:vector},${6:stats}; ${7:});"
+		],
+		"description": "Statistic property"
+	},
+
+	"@class property": {
+		"prefix": ["@class"],
+		"body": ["@class(${1:ClassName});"],
+		"description": "C++ class mapping"
+	},
+
+	"@interface property": {
+		"prefix": ["@interface"],
+		"body": ["@interface(${1:InterfaceName});"],
+		"description": "C++ interface mapping"
+	},
+
+	"Import": {
+		"prefix": ["import"],
+		"body": ["import ${1:inet.node.Protocol}${2:.*};"],
+		"description": "Import statement"
+	},
+
+	"Package": {
+		"prefix": ["package"],
+		"body": ["package ${1:org.example.project};"],
+		"description": "Package declaration"
+	},
+
+	"Property (custom)": {
+		"prefix": ["property", "@property"],
+		"body": ["@${1:propertyName}(${2:value});"],
+		"description": "Custom property"
+	},
+
+	"Conditional submodule": {
+		"prefix": ["submodule-if"],
+		"body": [
+			"${1:submoduleName}: ${2:ModuleType}",
+			"{",
+			"\tcondition: ${3:something == true};",
+			"\tgates:",
+			"\t\t${4:}",
+			"\tparameters:",
+			"\t\t${5:}",
+			"}"
+		],
+		"description": "Conditional submodule"
+	},
+
+	"Types block": {
+		"prefix": ["types"],
+		"body": [
+			"types:",
+			"\t${1:}",
+			""
+		],
+		"description": "Types block in compound module"
+	},
+
+	"Loop connection": {
+		"prefix": ["loop-connect"],
+		"body": [
+			"loop ${1:i} = ${2:0..N-1}",
+			"\t${3:node}[${1:i}].${4:gate}++ <--> ${5:node}[(${1:i}+1) % ${6:N}].${7:gate}++;",
+			""
+		],
+		"description": "Ring/loop connection pattern"
+	}
+}

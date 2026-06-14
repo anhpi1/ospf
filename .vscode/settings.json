@@ -1,0 +1,10 @@
+{
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**"
+    ],
+    "search.exclude": {
+        "out/**": true
+    },
+    "files.associations": {},
+    "lldb.showDisassembly": "never"
+}

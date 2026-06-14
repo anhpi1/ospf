@@ -1,0 +1,109 @@
+10.5 Nhận gói Hello (RFC 2328 trang 96-98)
+=========================================
+
+Nhận Hello
+    │
+    ├─1. Kiểm tra header OSPF chung (đã làm ở Section 8.2)
+    │
+    ├─2. Kiểm tra tham số
+    │   ├── NetworkMask == iface->mask?      (bỏ qua nếu P2P)
+    │   ├── HelloInterval == iface->helloInterval?
+    │   └── RouterDeadInterval == iface->routerDeadInterval?
+    │       └── sai → drop, stop
+    │
+    ├─3. Kiểm tra E-bit (Options)
+    │   └── Nếu area là stub → E-bit phải = 0
+    │       Nếu area backbone → E-bit phải = 1
+    │       └── sai → drop, stop
+    │
+    ├─4. Tìm/kết nối neighbor
+    │   ├── P2P: dùng RouterID trong OSPF header
+    │   ├── Broadcast/NBMA: dùng IP nguồn
+    │   ├── Nếu chưa có neighbor → tạo mới (state = Down)
+    │   └── P2P: set NeighborIP = IP nguồn của gói
+    │
+    ├─5. Sinh sự kiện cho máy trạng thái neighbor
+    │   └── HelloReceived → neighbor state machine
+    │
+    ├─6. Kiểm tra danh sách neighbor trong gói Hello
+    │   ├── Có RouterID của mình? → 2WayReceived
+    │   └── Không có           → 1WayReceived → stop
+    │
+    └─7. Kiểm tra thay đổi DR/BDR (broadcast/NBMA, P2P bỏ qua)
+        ├── RouterPriority thay đổi?            → NeighborChange
+        ├── DR field thay đổi?                  → NeighborChange / BackupSeen
+        └── BDR field thay đổi?                 → NeighborChange / BackupSeen
+
+Giải thích từng bước
+======================
+
+Bước 1 — Kiểm tra header chung
+    Đây là bước lọc tổng quát cho tất cả các loại gói OSPF (không chỉ Hello),
+    được định nghĩa ở Section 8.2. Kiểm tra:
+    - Phiên bản OSPF (phải = 2)
+    - Checksum
+    - Area ID (phải khớp với interface nhận)
+    - Auth type và auth data
+    Nếu không pass → drop gói, không xử lý tiếp.
+
+Bước 2 — Kiểm tra tham số cấu hình
+    So sánh các trường trong gói Hello với cấu hình của interface nhận:
+    - NetworkMask: Trên P2P, RFC nói rõ "should be ignored" (Section 10.5).
+      Trên broadcast/NBMA: mask nhận được phải == mask của interface, nếu không
+      thì hai router không cùng subnet → drop.
+    - HelloInterval: Nếu khác → drop. Vì nếu mỗi bên gửi Hello với tần suất
+      khác nhau, neighbor không thể đồng bộ timer.
+    - RouterDeadInterval: Nếu khác → drop. Mỗi bên phải thống nhất khoảng thời
+      gian chờ trước khi tuyên bố neighbor chết.
+
+    Mục đích: Đảm bảo hai router ở hai đầu link có cấu hình thống nhất.
+    Nếu không, chúng không thể làm neighbor.
+
+Bước 3 — Kiểm tra E-bit (Options)
+    Options field trong gói Hello chứa các bit đặc tả khả năng của router gửi.
+    Bit E (bit thứ 0): cho biết router có hỗ trợ AS-external-LSA không.
+    - Nếu area là "stub" (không cho AS-external-LSA vào) → E-bit trong Hello
+      nhận được phải = 0
+    - Nếu area là backbone (cho phép external) → E-bit phải = 1
+    Không khớp → drop (vì không thể đồng bộ LSDB nếu khác quan điểm về external).
+
+Bước 4 — Tìm/kết nối neighbor
+    Xác định neighbor nào trên interface này đã gửi Hello đến:
+    - P2P: dùng Router ID trong OSPF header. Vì P2P chỉ có 1 đầu kia, Router ID
+      là đủ để nhận dạng.
+    - Broadcast/NBMA: dùng IP nguồn của gói IP, vì có thể nhiều neighbor trên
+      cùng 1 mạng.
+    - Nếu chưa có cấu trúc NeighborData nào khớp → tạo mới, state = Down.
+    - P2P: set NeighborIP address = IP nguồn (dùng sau này để gửi unicast).
+
+Bước 5 — Sinh sự kiện HelloReceived
+    Mỗi Hello nhận được (bất kể nội dung) đều kích hoạt sự kiện HelloReceived
+    cho máy trạng thái neighbor (Section 10.3). Sự kiện này làm:
+    - Nếu neighbor đang ở Down → chuyển sang Init
+    - Reset inactivity timer (vì vừa nghe thấy nó còn sống)
+
+Bước 6 — Kiểm tra danh sách neighbor
+    Gói Hello chứa danh sách các Router ID mà router gửi đã nghe thấy trên
+    interface đó. Kiểm tra xem Router ID của mình có trong danh sách đó không:
+    - CÓ: neighbor cũng thấy mình → bidirectional communication → 2WayReceived
+      → P2P: chuyển từ Init lên 2Way. Nếu đã 2Way rồi → không sao, giữ nguyên.
+      → Đây là bước xác nhận "mày thấy tao, tao thấy mày".
+    - KHÔNG: neighbor chưa thấy mình → 1WayReceived
+      → Nếu đang ở Init/2Way trở lên → quay về Init (mất bidirectional)
+      → Stop xử lý phần còn lại
+
+    Trên P2P: neighbor list chỉ có 0 hoặc 1 phần tử. Nếu mới gửi Hello lần đầu
+    và chưa có thông tin gì, neighbor list rỗng.
+
+Bước 7 — Kiểm tra DR/BDR (P2P bỏ qua)
+    Các mục này chỉ áp dụng cho broadcast/NBMA (liên quan bầu DR/BDR).
+    P2P không có DR/BDR (Section 9.1: "DR election is not performed on
+    point-to-point interfaces"), nên bỏ qua các bước này trong phạm vi dự án.
+
+Tóm tắt cho P2P (phạm vi dự án)
+=================================
+Nhận Hello → kiểm tra header → kiểm tra tham số (bỏ qua mask) → kiểm tra E-bit
+→ tìm/tạo neighbor → HelloReceived → kiểm tra neighbor list
+  → có RouterID mình? → 2WayReceived
+  → không có?          → 1WayReceived → stop
+→ bỏ qua DR/BDR (P2P)

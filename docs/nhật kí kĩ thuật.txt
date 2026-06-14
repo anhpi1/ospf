@@ -1,0 +1,62 @@
+viết ned
+viết .msg
+viết cấu trúc dữ liệu Router
+    Ban đầu tính theo RFC: [ OSPF Header (24 byte, chung) ] [ data tùy type ]
+    → 1 class message duy nhất, header validate xong rồi vấn đề là data phải là dạng void để vận chuyển dữ liệu
+    msg không hỗi trợ cấu hình như này, nếu viết tay để phù hợp với cấu hình mô phỏng đó là 1 khối lượng công việc khổng lồ không khả thi
+    tốt nhất vẫn phải để msg tự sinh
+    chuyển thiết kế sang .msg hiện tại: mỗi loại gói (Hello, DD, LSR...) có
+    class riêng kèm headerOspfMess bên trong. Thêm hàm validateHeader() chung
+    để kiểm tra header trước, rồi dynamic_cast xuống body cụ thể.
+    Vừa tận dụng code .msg, vừa đúng luồng RFC (validate header → xử lý body).
+
+    ip adr với mạng p2p thì mặc định lấy iprouter và lấy mặt nạ là 0
+    RFC 2328 Section 10.5: "on point-to-point networks and on virtual links,
+    the Network Mask in the received Hello Packet should be ignored."
+    → P2P unnumbered không cần kiểm tra subnet khi nhận Hello.
+
+
+
+quyết định đổi thiết kế sang 1 message duy nhất
+    Vấn đề: Thiết kế cũ mỗi loại gói 1 message riêng, header nằm trong từng
+    class → dynamic_cast nhiều lần, không đúng RFC (1 header chung cho mọi gói).
+
+    Tính năng tìm ra: Header OSPF có field type (1..5) + length (tổng bytes) →
+    chỉ cần 1 cấu trúc header duy nhất, dựa vào type để parse body tương ứng.
+
+    Thiết kế cũ: Mỗi loại gói 1 message riêng + validateHeader() + dynamic_cast.
+
+    Thiết kế mới: 1 message duy nhất ospfMess { struct headerOspfMess header;
+    uint8_t payload[]; }. headerOspfMess là struct dùng chung. Đọc header →
+    check type → parse payload thủ công theo type đó. Đúng RFC, gọn, ít code.
+
+    Lưu ý: Struct C++ có padding byte, sizeof() không đảm bảo đúng 24 bytes
+    như RFC. Không dùng memcpy/reinterpret_cast. Phải tự parse từng field
+    từ mảng byte (từ payload[] hoặc encode vào payload[] khi gửi).
+    page 190
+       Packet length (Độ dài gói tin)
+        Độ dài của gói tin giao thức OSPF tính bằng byte. Độ dài này
+        bao gồm cả phần tiêu đề OSPF tiêu chuẩn.
+
+
+
+viết xử lý header
+
+
+viết lập lịch gửi gói tin hello
+    Vấn đề: OMNeT++ không có thread, làm sao gửi Hello định kỳ mỗi 10s?
+    Hệ thống thật cần 2 thread: 1 thread while+sleep gửi, 1 thread nhận.
+    Nhưng OMNeT++ là discrete event simulation — không thread, không sleep, không while.
+
+    Cách giải quyết:
+    - Bản chất scheduleAt() là lập lịch gửi gói tin ở thời điểm tương lai.
+      Ở đây lợi dụng nó: gửi 1 cMessage rỗng (không data) làm báo thức,
+      mục đích duy nhất là kích hoạt handleMessage().
+    - Khi báo thức reo → kernel gọi handleMessage() → isSelfMessage()=true →
+      gọi sendHello() tạo helloOspf thật rồi send() → scheduleAt() hẹn lần sau.
+    - initState() chỉ đặt báo thức đầu tiên. Mọi hành vi của router (gửi/nhận/xử lý)
+      đều phải qua handleMessage().
+    - 1 hàm handleMessage() đảm nhiệm cả 2 vai trò: gửi định kỳ + nhận và xử lý gói tin.
+    - Bug: gateSize("ppg") → sửa thành gateSize("gate").
+
+viết xử lý gói tin hello

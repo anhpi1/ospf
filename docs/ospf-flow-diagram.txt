@@ -1,0 +1,437 @@
+================================================================================
+                         OSPFv2 TOÀN CẢNH (RFC 2328)
+                             Sơ đồ luồng giao thức
+================================================================================
+
+Phần 1: KIẾN TRÚC DỮ LIỆU CẤP CAO
+==================================
+
+                  +-----------------------------+
+                  |       AUTONOMOUS SYSTEM     |
+                  |  (toàn bộ các router OSPF)  |
+                  +-----------------------------+
+                  |                             |
+     +------------+-------------+   +-----------+------------+
+     |         AREA 0           |   |      AREA 1            |
+     |    (Backbone area)       |   |  (non-backbone area)   |
+     |                          |   |                        |
+     |  +------+    +------+    |   |   +------+    +------+ |
+     |  |Router|    |Router|    |   |   |Router|    |Router| |
+     |  |  R1  |----|  R2  |    |   |   |  R3  |----|  R4  | |
+     |  +------+    +------+    |   |   +------+    +------+ |
+     +--------------------------+   +------------------------+
+                    |                          |
+                    |      Area Border Router  |
+                    |   (R2 vừa thuộc area 0   |
+                    |    vừa thuộc area 1)      |
+                    +--------------------------+
+
+
+Phần 2: CẤU TRÚC DỮ LIỆU TRONG MỘT ROUTER (Section 5)
+=======================================================
+
+     ROUTER
+     +-- router_id          : 32-bit, duy nhất trong AS
+     |
+     +-- Area[]             : mỗi area có 1 bản copy thuật toán OSPF riêng
+     |   +-- Area ID
+     |   +-- Interface[]
+     |   |   +-- Interface Data Structure (Section 9)
+     |   |   +-- interfaceType (P2P, Broadcast, NBMA, Point-to-MultiPoint, Virtual)
+     |   |   +-- interfaceState (Down, Loopback, Waiting, PointToPoint, DR, Backup)
+     |   |   +-- HelloInterval, RouterDeadInterval
+     |   |   +-- AuthType, Authentication Key
+     |   |   +-- DR, BDR (cho broadcast/NBMA)
+     |   |   +-- Neighbor[] (cho interface này)
+     |   |       +-- Neighbor Data Structure (Section 10)
+     |   |       +-- Neighbor ID
+     |   |       +-- Neighbor State (Down→Init→2Way→ExStart→Exchange→Loading→Full)
+     |   |       +-- Inactivity Timer
+     |   |       +-- DD Sequence Number
+     |   |       +-- LSA Retransmission List
+     |   |       +-- Link State Request List
+     |   |       +-- Link State Retransmission List
+     |   |
+     |   +-- Link State Database (LSDB cho area này)
+     |       +-- Router-LSA[]
+     |       +-- Network-LSA[]
+     |       +-- Summary-LSA[]  (type 3 & 4)
+     |
+     +-- Backbone Area Structure
+     +-- Virtual Links[]
+     +-- AS-external-LSA[]     (type 5, global)
+     +-- Routing Table
+
+
+Phần 3: CẤU TRÚC GÓI TIN (Appendix A)
+======================================
+
+MỌI gói OSPF đều bắt đầu bằng OSPF Packet Header 24 byte:
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |   Version #   |     Type      |         Packet length         |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                          Router ID                            |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                           Area ID                             |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |           Checksum            |             AuType            |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                       Authentication                          |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                       Authentication                          |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  Trường Type quyết định loại gói phía sau:
+    Type 1 → Hello (A.3.2)
+    Type 2 → Database Description (A.3.3)
+    Type 3 → Link State Request (A.3.4)
+    Type 4 → Link State Update (A.3.5)
+    Type 5 → Link State Acknowledgment (A.3.6)
+
+
+Phần 4: CẤU TRÚC TỪNG LOẠI GÓI
+===============================
+
+4.1 HELLO PACKET (Type 1)
+    Gửi định kỳ để phát hiện và duy trì neighbor. Multicast (AllSPFRouters).
+    Đồng thuận các tham số: NetworkMask, HelloInterval, RouterDeadInterval.
+
+    [OSPF Header 24 byte - Type=1]
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                        Network Mask                           |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |         HelloInterval         |    Options    |    Rtr Pri    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                     RouterDeadInterval                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                      Designated Router                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                   Backup Designated Router                    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                          Neighbor                             |  (×N, mỗi cái 32-bit Router ID)
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+4.2 DATABASE DESCRIPTION PACKET (Type 2)
+    Trao đổi khi adjacency khởi tạo. Master/slave, poll-response.
+    Chỉ mang LSA HEADER (20 byte), không mang thân LSA.
+
+    [OSPF Header 24 byte - Type=2]
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |         Interface MTU         |    Options    |0|0|0|0|0|I|M|MS
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                     DD sequence number                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                       An LSA Header                           |  (×N, mỗi cái 20 byte)
+   +-                                                             -+
+   |                              ...                              |
+
+    Các bit điều khiển: I=Init, M=More, MS=Master/Slave
+
+4.3 LINK STATE REQUEST PACKET (Type 3)
+    Yêu cầu các LSA còn thiếu sau khi DD exchange. Không gửi LS sequence number
+    → neighbor trả về instance mới nhất.
+
+    [OSPF Header 24 byte - Type=3]
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                          LS type                              |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                       Link State ID                           |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                     Advertising Router                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                              ...                              |  (×N bộ 3 trường 12 byte)
+
+4.4 LINK STATE UPDATE PACKET (Type 4)
+    Flood LSA đi 1 hop. Đây là gói DUY NHẤT mang nguyên vẹn LSA (header + body).
+    Được ack bởi LSAck.
+
+    [OSPF Header 24 byte - Type=4]
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                            # LSAs                             |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                            LSAs                               |  (×N LSA nguyên vẹn, mỗi cái:
+   +-                                                             -+   LSA Header 20 byte + LSA Body)
+   |                              ...                              |
+
+4.5 LINK STATE ACKNOWLEDGMENT PACKET (Type 5)
+    Xác nhận đã nhận LSA. Gửi unicast hoặc multicast (AllSPFRouters / AllDRouters).
+    Thân gói GIỐNG DD: danh sách LSA Header đầy đủ (20 byte).
+
+    [OSPF Header 24 byte - Type=5]
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                       An LSA Header                           |  (×N, mỗi cái 20 byte)
+   +-                                                             -+
+   |                              ...                              |
+
+
+Phần 5: CẤU TRÚC LSA (Appendix A.4)
+====================================
+
+MỌI LSA đều bắt đầu bằng LSA Header 20 byte:
+
+    0                   1                   2                   3
+    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |            LS age             |    Options    |    LS type    |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                        Link State ID                          |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                     Advertising Router                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                     LS sequence number                        |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |         LS checksum           |             length            |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  LS type quyết định phần thân phía sau:
+    Type 1 → Router-LSA       (A.4.2)
+    Type 2 → Network-LSA      (A.4.3)
+    Type 3 → Summary-LSA (IP network)  (A.4.4)
+    Type 4 → Summary-LSA (ASBR)        (A.4.4)
+    Type 5 → AS-external-LSA  (A.4.5)
+
+5.1 ROUTER-LSA (Type 1)
+    Mỗi router tạo 1 Router-LSA cho mỗi area nó tham gia.
+    Mô tả trạng thái và cost của các link.
+
+    [LSA Header 20 byte - LS type=1]
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |    0    |V|E|B|        0      |            # links            |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                          Link ID                              |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                         Link Data                             |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |     Type      |     # TOS     |            metric             |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |      TOS      |        0      |          TOS metric           |
+   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+   |                              ...                              |  (×N links)
+
+    Bit: V=Virtual link endpoint, E=AS boundary router, B=Area border router
+    Link Type: 1=P2P, 2=Transit, 3=Stub, 4=Virtual link
+
+
+Phần 6: NEIGHBOR STATE MACHINE (Section 10.3)
+===============================================
+
+  Router A ───────────────────────────────────────── Router B
+
+  +----------------+
+  |     DOWN       | ← trạng thái khởi đầu, chưa biết neighbor
+  +-------+--------+
+          | nhận Hello từ neighbor
+          v
+  +----------------+
+  |     INIT       | ← đã thấy neighbor nhưng chưa bidirectional
+  +-------+--------+
+          | thấy chính mình (self) trong Neighbor list của Hello B gửi đến
+          v
+  +----------------+
+  |    TWO-WAY     | ← bidirectional! Trên P2P → ngay lập tức bắt đầu adjacency
+  +-------+--------+
+          | (trên broadcast: quyết định bởi DR/BDR)
+          v                           ExStart ── Không được! ──→ TWO-WAY
+  +----------------+
+  |   EXSTART      | ← master/slave negotiation (DD với I,M,MS bits)
+  +-------+--------+
+          | NegotiationDone
+          v
+  +----------------+
+  |   EXCHANGE     | ← trao đổi DD packets, liệt kê LSA headers
+  +-------+--------+
+          | ExchangeDone
+          v
+  +----------------+
+  |   LOADING      | ← gửi LSR yêu cầu LSA thiếu, nhận LSU, gửi LSAck
+  +-------+--------+
+          | LoadingDone (link state request list rỗng)
+          v
+  +----------------+
+  |     FULL       | ← adjacency hoàn tất, LSDB đồng bộ
+  +----------------+
+
+  Các sự kiện đặc biệt:
+    SeqNumberMismatch → ExStart (reset DD sequence)
+    BadLSReq          → ExStart    (LSA không tồn tại)
+    One-Way           → Init       (không còn bidirectional)
+    KillNbr           → Down       (neighbor chết, inactivity timer hết hạn)
+    LLDown            → Down       (interface low-level down)
+
+
+Phần 7: LUỒNG HOẠT ĐỘNG TOÀN BỘ (Section 4)
+=============================================
+
+                    ROUTER KHỞI ĐỘNG
+                          │
+                          v
+     +─────────────────────────────────────────────────+
+     │  1. Khởi tạo cấu trúc dữ liệu (Section 4)       │
+     │     - Router ID, Area, Interface, LSDB          │
+     │     - Bắt đầu gửi Hello định kỳ (Section 9.5)   │
+     +─────────────────────────────────────────────────+
+                          │
+                          v
+     +─────────────────────────────────────────────────+
+     │  2. HELLO PROTOCOL (Section 10.5)               │
+     │     - Gửi Hello mỗi HelloInterval (default 10s) │
+     │     - Nhận Hello → kiểm tra parameter match     │
+     │     - Kiểm tra bidirectional (self in list?)    │
+     │     - Cập nhật Neighbor State Machine           │
+     │     - Reset Inactivity Timer (RouterDeadInterval)│
+     │     - Trên broadcast: bầu DR/BDR (Section 9.4)  │
+     +─────────────────────────────────────────────────+
+                          │
+                          v (neighbor → TwoWay)
+     +─────────────────────────────────────────────────+
+     │  3. DATABASE SYNCHRONIZATION (Section 10.6)     │
+     │                                                  │
+     │  ExStart:                                        │
+     │    Master/slave negotiate (higher routerID=master)│
+     │                                                  │
+     │  Exchange:                                       │
+     │    Master poll → Slave response với DD packets   │
+     │    Mỗi DD mang danh sách LSA Header (20 byte)    │
+     │    M-bit=1 nếu còn DD nữa                        │
+     │    Khi M=0 ở cả 2 phía → ExchangeDone            │
+     │                                                  │
+     │  Loading:                                        │
+     │    Tạo Link State Request List                   │
+     │    Gửi LSR (Section 10.9)                        │
+     │    Nhận LSU → cài LSA vào LSDB → gửi LSAck       │
+     │    Đến khi Request List rỗng → LoadingDone       │
+     │                                                  │
+     │  → FULL (adjacency formed!)                      │
+     +─────────────────────────────────────────────────+
+                          │
+                          v
+     +─────────────────────────────────────────────────+
+     │  4. FLOODING (Section 13)                       │
+     │     - Khi nhận LSU, flood LSA ra các interface  │
+     │       khác (trừ interface nhận và interface     │
+     │       không có adjacency FULL)                  │
+     │     - Mỗi LSA được ack riêng (LSAck)            │
+     │     - LS sequence number tăng dần → quyết định  │
+     │       instance nào mới hơn                      │
+     │     - LSA aging: LS age tăng dần, khi đạt       │
+     │       MaxAge (3600s) → flush                    │
+     │     - LSRefreshTime (1800s) → tự originate lại  │
+     │       LSA của chính mình                        │
+     +─────────────────────────────────────────────────+
+                          │
+                          v
+     +─────────────────────────────────────────────────+
+     │  5. LSDB (mỗi area một bản riêng)              │
+     │     Tập hợp tất cả Router-LSA + Network-LSA    │
+     │     + Summary-LSA + AS-external-LSA             │
+     │     Đây là input cho SPF calculation            │
+     +─────────────────────────────────────────────────+
+                          │
+                          v (mỗi khi LSDB thay đổi, sau spfDelay)
+     +─────────────────────────────────────────────────+
+     │  6. SPF CALCULATION - DIJKSTRA (Section 16)     │
+     │     - Dựng graph từ LSDB                        │
+     │     - Root = self router                        │
+     │     - Tính shortest path tree                   │
+     │     - Hỗ trợ ECMP (equal-cost multi-path)       │
+     +─────────────────────────────────────────────────+
+                          │
+                          v
+     +─────────────────────────────────────────────────+
+     │  7. ROUTING TABLE (Section 11)                  │
+     │     - Intra-area routes (từ SPF)                │
+     │     - Inter-area routes (từ Summary-LSA)        │
+     │     - External routes (từ AS-external-LSA)      │
+     │     - Next-hop, interface, metric               │
+     +─────────────────────────────────────────────────+
+                          │
+                          v
+     +─────────────────────────────────────────────────+
+     │  8. DATA FORWARDING                             │
+     │     - Lookup destination IP trong routing table │
+     │     - Forward ra interface tương ứng            │
+     │     - ECMP: chọn 1 trong các next-hop bằng nhau │
+     +─────────────────────────────────────────────────+
+
+
+Phần 8: KIẾN TRÚC XỬ LÝ GÓI ĐẾN (Section 8.2)
+===============================================
+
+  Gói OSPF đến interface
+         │
+         v
+  +──────────────────+
+  | Kiểm tra IP header│
+  +──────────────────+
+         │
+         v
+  +──────────────────────+
+  | Verify OSPF header:  │
+  |  - Version #          │
+  |  - Area ID match      │
+  |  - Checksum (if AuType│
+  |    requires)          │
+  |  - AuthType match     │
+  |  - Authentication     │
+  +──────────────────────+
+         │
+         v
+  ┌─────────────────┐
+  │   Phân loại      │
+  │   Type field:     │
+  │   1→processHello  │          ┌────────────────────────────────┐
+  │   2→processDD     │──────→   │ Mỗi loại có quy tắc riêng:     │
+  │   3→processLSR    │          │ - Chỉ nhận khi neighbor state   │
+  │   4→processLSU    │          │   phù hợp                      │
+  │   5→processLSAck  │          │ - P2P: nhận từ neighbor duy nhất│
+  └─────────────────┘          │ - Broadcast: nhận từ bất kỳ     │
+                               └────────────────────────────────┘
+
+
+Phần 9: TÓM TẮT PHÂN CẤP ĐÓNG GÓI
+====================================
+
+  IP Packet
+  └── OSPF Message
+      ├── OSPF Packet Header (24 byte - LUÔN CÓ)
+      │   ├── Version #
+      │   ├── Type (1-5)
+      │   ├── Packet length
+      │   ├── Router ID
+      │   ├── Area ID
+      │   ├── Checksum
+      │   ├── AuType
+      │   └── Authentication (64 bit)
+      │
+      └── OSPF Packet Body (phụ thuộc Type)
+          │
+          ├── Type 1: Hello Body
+          │   ├── NetworkMask, HelloInterval, Options, RtrPri
+          │   ├── RouterDeadInterval, DR, BDR
+          │   └── Neighbor[] (RouterID × N)
+          │
+          ├── Type 2: DD Body
+          │   ├── MTU, Options, I|M|MS bits
+          │   ├── DD sequence number
+          │   └── LSA Header[] (20 byte × N)
+          │
+          ├── Type 3: LSR Body
+          │   └── (LS type, Link State ID, Advertising Router)[] (12 byte × N)
+          │
+          ├── Type 4: LSU Body
+          │   ├── # LSAs
+          │   └── LSA[] (nguyên vẹn: LSA Header 20 byte + LSA Body)
+          │       ├── Type 1: Router-LSA → links
+          │       ├── Type 2: Network-LSA → attached routers
+          │       ├── Type 3/4: Summary-LSA
+          │       └── Type 5: AS-external-LSA
+          │
+          └── Type 5: LSAck Body
+              └── LSA Header[] (20 byte × N)
+
+================================================================================
+                              HẾT
+================================================================================
