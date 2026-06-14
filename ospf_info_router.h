@@ -4,9 +4,15 @@
 #include <cstdint>
 #include <vector>
 #include <map>
+#include <string>
+#include <fstream>
+#include <filesystem>
 #include <omnetpp.h>
 
 using namespace omnetpp;
+
+// toàn bộ unsigned int đều là kiều dữ liệu chưa biết vì trong ospf không có quy định về số lượng bit
+
 
 enum OspfNeighborState : uint8_t {
     NBR_DOWN     = 0,
@@ -131,6 +137,8 @@ class OspfRouterState {
 
         OspfRouterState(uint32_t routerId, int numInterfaces);
         ~OspfRouterState();
+
+        void printState();
 };
 
 #endif

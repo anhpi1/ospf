@@ -17,6 +17,7 @@ class routerOspf : public cSimpleModule
     private:
         OspfRouterState* state;
         uint32_t routerId;
+        cMessage* helloTimer;
     protected:
         virtual void initialize() override;
         virtual void handleMessage(cMessage *msg) override;

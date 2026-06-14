@@ -36,7 +36,7 @@ void helloData::sendHello(int ifIndex, OspfRouterState& state, uint32_t routerId
         msg->payload[i] = buf[i];
 
     msg->length = 24 + bodyLen;               // tổng bytes: header 24 + body
-    mod->send(msg, "gate", ifIndex);
+    mod->send(msg, "gate$o", ifIndex);
 }
 
 // ===== OspfMess static methods =====
@@ -84,4 +84,72 @@ uint8_t OspfMess::parsePacket(const OspfMess* msg, const InterfaceData* iface,
     data = msg->payload;
 
     return msg->type;
+}
+
+// Đọc big-endian từ buffer
+uint32_t OspfMess::get32(const uint8_t* buf, int& off) {
+    uint32_t v = ((uint32_t)buf[off] << 24) | ((uint32_t)buf[off+1] << 16)
+               | ((uint32_t)buf[off+2] << 8) | buf[off+3];
+    off += 4;
+    return v;
+}
+uint16_t OspfMess::get16(const uint8_t* buf, int& off) {
+    uint16_t v = ((uint16_t)buf[off] << 8) | buf[off+1];
+    off += 2;
+    return v;
+}
+uint8_t OspfMess::get8(const uint8_t* buf, int& off) {
+    return buf[off++];
+}
+
+// Xử lý gói Hello nhận được (RFC 2328 Section 10.5, P2P)
+void helloData::processHello(const headerOspf& hdr, const std::vector<uint8_t>& data,
+                              InterfaceData* iface, uint32_t myRouterId)
+{
+    if (data.size() < 20) return;  // tối thiểu 20 byte (không neighbor)
+
+    // Bước 2: parse Hello body vào helloData (RFC A.3.2)
+    helloData hello;
+    int off = 0;
+    hello.networkMask         = OspfMess::get32(data.data(), off);
+    hello.helloInterval       = OspfMess::get16(data.data(), off);
+    hello.options             = OspfMess::get8(data.data(), off);
+    hello.routerPriority      = OspfMess::get8(data.data(), off);
+    hello.routerDeadInterval  = OspfMess::get32(data.data(), off);
+    hello.designatedRouter    = OspfMess::get32(data.data(), off);
+    hello.backupDesignatedRouter = OspfMess::get32(data.data(), off);
+
+    // Danh sách neighbor (nếu có)
+    int nbrCount = ((int)data.size() - 20) / 4;
+    for (int i = 0; i < nbrCount; i++)
+        hello.neighborId.push_back(OspfMess::get32(data.data(), off));
+
+    // Kiểm tra tham số (P2P: bỏ qua NetworkMask)
+    if (hello.helloInterval != iface->helloInterval)       return;
+    if (hello.routerDeadInterval != iface->routerDeadInterval) return;
+
+    // Bước 3: kiểm tra E-bit
+    bool eBit = (hello.options & 0x02);
+    if (iface->areaID == 0 && !eBit)            return;  // backbone phải có E-bit
+
+    // Cập nhật dữ liệu từ hello vào neighbor
+    NeighborData* nbr = iface->neighbor;
+    if (nbr->neighborID == 0)
+        nbr->neighborID = hdr.routerId;
+    nbr->priority = hello.routerPriority;
+
+    // Bước 5: HelloReceived
+    if (nbr->state == NBR_DOWN)
+        nbr->state = NBR_INIT;
+
+    // Bước 6: kiểm tra neighbor list — có RouterID mình không?
+    bool seen = false;
+    for (uint32_t nid : hello.neighborId) {
+        if (nid == myRouterId) { seen = true; break; }
+    }
+
+    if (seen && nbr->state < NBR_TWOWAY)
+        nbr->state = NBR_TWOWAY;
+    else if (!seen && nbr->state >= NBR_TWOWAY)
+        nbr->state = NBR_INIT;
 }

@@ -2,6 +2,19 @@
 #include <vector>
 #include <omnetpp.h>
 
+// 24-byte OSPF header (RFC A.3.1)
+struct headerOspf {
+    uint8_t version;
+    uint8_t type;
+    uint16_t length;
+    uint32_t routerId;
+    uint32_t areaId;
+    uint16_t checksum;
+    uint16_t authType;
+    uint32_t authData1;
+    uint32_t authData2;
+};
+
 
 //type 1
 class helloData
@@ -17,7 +30,10 @@ class helloData
         std::vector<uint32_t> neighborId;
 
         static void sendHello(int ifIndex, OspfRouterState& state, uint32_t routerId, omnetpp::cSimpleModule* mod);
-        
+
+        // Xử lý gói Hello nhận được (RFC 2328 Section 10.5)
+        static void processHello(const headerOspf& hdr, const std::vector<uint8_t>& data,
+                                 InterfaceData* iface, uint32_t myRouterId);
 };
 
 //type 2
@@ -74,19 +90,6 @@ class linkStateAcknowledgementData
 
 //header OSPF packet
 
-// 24-byte OSPF header (RFC A.3.1)
-struct headerOspf {
-    uint8_t version;
-    uint8_t type;
-    uint16_t length;
-    uint32_t routerId;
-    uint32_t areaId;
-    uint16_t checksum;
-    uint16_t authType;
-    uint32_t authData1;
-    uint32_t authData2;
-};
-
 class OspfMess : public omnetpp::cMessage
 {
     public:
@@ -106,9 +109,12 @@ class OspfMess : public omnetpp::cMessage
         static void put32(uint8_t* buf, int& off, uint32_t v);
         static void put16(uint8_t* buf, int& off, uint16_t v);
         static void put8(uint8_t* buf, int& off, uint8_t v);
+        static uint32_t get32(const uint8_t* buf, int& off);
+        static uint16_t get16(const uint8_t* buf, int& off);
+        static uint8_t get8(const uint8_t* buf, int& off);
 
         // Tách msg thành header + data thô, trả về type (0 nếu fail)
-        static uint8_t parsePacket(const OspfMess* msg, const InterfaceData* iface,
-                                   headerOspf& hdr, std::vector<uint8_t>& data);
+        static uint8_t parsePacket(const OspfMess* msg, const InterfaceData* iface, headerOspf& hdr, std::vector<uint8_t>& data);
+
 };
 

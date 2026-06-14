@@ -13,8 +13,15 @@ void routerOspf::initialize()
     int n = gateSize("gate");
     state = new OspfRouterState(routerId, n);
 
-    cMessage* timer = new cMessage("helloBaoThuc");
-    scheduleAt(simTime() + state->interfaces[0].helloInterval, timer);
+    // Gửi Hello ngay lập tức trên tất cả interface
+    for (int i = 0; i < n; i++) {
+        helloData::sendHello(i, *state, routerId, this);
+    }
+
+    // Đặt lịch gửi Hello định kỳ
+    helloTimer = new cMessage("helloBaoThuc");
+    helloTimer->setKind(1);  // đánh dấu timer để phân biệt màu
+    scheduleAt(simTime() + state->interfaces[0].helloInterval, helloTimer);
 }
 
 
@@ -44,13 +51,18 @@ void routerOspf::handleMessage(cMessage *msg)
             return;
         }
 
-        // hdr = header đã tách, data = payload thô chưa xử lý
-        // TODO: dispatch theo pktType (1=Hello, 2=DD, 3=LSR, 4=LSU, 5=LSAck)
+        // Dispatch theo type
+        if (pktType == 1) {
+            helloData::processHello(hdr, data, iface, routerId);
+        }
+        // TODO: type 2=DD, 3=LSR, 4=LSU, 5=LSAck
         delete msg;
     }
 }
 
 void routerOspf::finish()
 {
+    cancelAndDelete(helloTimer);
+    state->printState();
     delete state;
 }

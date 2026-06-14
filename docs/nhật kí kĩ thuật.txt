@@ -60,3 +60,7 @@ viết lập lịch gửi gói tin hello
     - Bug: gateSize("ppg") → sửa thành gateSize("gate").
 
 viết xử lý gói tin hello
+
+Viết hàm in trạng thái router
+
+chạy mô phỏng xem hoạt động của helo

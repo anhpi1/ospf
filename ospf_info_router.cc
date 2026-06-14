@@ -71,5 +71,106 @@ OspfRouterState::~OspfRouterState()
         delete iface.neighbor;
 }
 
+// Hàm chuyển enum thành tên
+static const char* nbrStateName(int s) {
+    switch (s) {
+        case NBR_DOWN:     return "Down";
+        case NBR_ATTEMPT:  return "Attempt";
+        case NBR_INIT:     return "Init";
+        case NBR_TWOWAY:   return "2Way";
+        case NBR_EXSTART:  return "ExStart";
+        case NBR_EXCHANGE: return "Exchange";
+        case NBR_LOADING:  return "Loading";
+        case NBR_FULL:     return "Full";
+        default:           return "?";
+    }
+}
+static const char* ifStateName(int s) {
+    switch (s) {
+        case IF_DOWN:         return "Down";
+        case IF_LOOPBACK:     return "Loopback";
+        case IF_WAITING:      return "Waiting";
+        case IF_POINTTOPOINT: return "PointToPoint";
+        case IF_DROTHER:      return "DROther";
+        case IF_BACKUP:       return "Backup";
+        case IF_DR:           return "DR";
+        default:              return "?";
+    }
+}
+
+void OspfRouterState::printState()
+{
+    namespace fs = std::filesystem;
+    fs::create_directories("state_dump");
+
+    // Tìm số file lớn nhất trong state_dump/
+    int maxNum = 0;
+    for (const auto& entry : fs::directory_iterator("state_dump")) {
+        std::string name = entry.path().stem().string();
+        try { int n = std::stoi(name); if (n > maxNum) maxNum = n; }
+        catch (...) {}
+    }
+    int fileNumber = maxNum + 1;
+
+    // Mở file state_dump/<số>.log
+    std::string filename = "state_dump/" + std::to_string(fileNumber) + ".log";
+    std::ofstream f(filename);
+    if (!f.is_open()) return;
+
+    f << "OSPF State dump #" << fileNumber << "\n";
+    f << "Router ID: " << routerID << "\n\n";
+
+    // --- Interfaces ---
+    f << "--- Interfaces (" << interfaces.size() << ") ---\n";
+    for (size_t i = 0; i < interfaces.size(); i++) {
+        const InterfaceData& iface = interfaces[i];
+        f << "  [" << i << "] type=" << iface.type
+          << " state=" << ifStateName(iface.state)
+          << " area=0x" << std::hex << iface.areaID << std::dec
+          << " cost=" << iface.cost
+          << " helloInt=" << iface.helloInterval
+          << " deadInt=" << iface.routerDeadInterval << "\n";
+        f << "       ip=0x" << std::hex << iface.ipAddress << std::dec
+          << " mask=0x" << std::hex << iface.mask << std::dec
+          << " priority=" << (int)iface.routerPriority << "\n";
+
+        // Neighbor đi kèm
+        if (iface.neighbor) {
+            const NeighborData& nbr = *iface.neighbor;
+            f << "       nbr: id=" << nbr.neighborID
+              << " state=" << nbrStateName(nbr.state)
+              << " priority=" << (int)nbr.priority
+              << " master=" << nbr.isMaster
+              << " ddSeq=" << nbr.ddSequenceNumber << "\n";
+        }
+    }
+
+    // --- Area ---
+    f << "\n--- Area ---\n";
+    f << "  areaID=0x" << std::hex << area.areaID << std::dec
+      << " transit=" << area.transitCapability
+      << " extRouting=" << area.externalRoutingCapability
+      << " stubCost=" << area.stubDefaultCost << "\n";
+    f << "  interfaces: ";
+    for (int idx : area.interfaceIndices) f << idx << " ";
+    f << "\n";
+    f << "  LSDB: " << area.routerLSAs.size() << " Router-LSAs\n";
+    f << "  SPF tree: " << area.spfTree.size() << " entries\n";
+
+    // --- Routing Table ---
+    f << "\n--- Routing Table (" << routingTable.size() << ") ---\n";
+    for (size_t i = 0; i < routingTable.size(); i++) {
+        const RoutingTableEntry& rte = routingTable[i];
+        f << "  [" << i << "] dest=0x" << std::hex << rte.destinationId << std::dec
+          << " mask=0x" << std::hex << rte.addressMask << std::dec
+          << " pathType=" << (int)rte.pathType
+          << " cost=" << rte.cost
+          << " nextHopIf=" << rte.nextHopInterfaceIndex
+          << " nextHopRtr=0x" << std::hex << rte.nextHopRouterID << std::dec << "\n";
+    }
+
+    f.close();
+}
+
 
 
