@@ -63,4 +63,14 @@ viết xử lý gói tin hello
 
 Viết hàm in trạng thái router
 
-chạy mô phỏng xem hoạt động của helo
+chạy mô phỏng xem hoạt động của hello
+
+sửa lại cấu trúc gói tin sai tùm lum :))
+  tái cấu trúc lại các cấu trúc gói tin
+  tinh gọn lại msg coi msg như là một kênh truyền vật lý chỉ dùng dể truyền dữ liệu
+
+
+viết gửi gói tin cho bước Exstart 
+
+viết xử lý gói tin cho bước Exstart
+

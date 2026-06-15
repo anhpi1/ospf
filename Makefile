@@ -31,7 +31,7 @@ PROJECTRELATIVE_PATH =
 O = $(PROJECT_OUTPUT_DIR)/$(CONFIGNAME)/$(PROJECTRELATIVE_PATH)
 
 # Object files for local .cc, .msg and .sm files
-OBJS = $O/ospf.o $O/ospf_info_router.o $O/ospf_paket.o
+OBJS = $O/ospf.o $O/ospf_struct.o $O/ospf_m.o
 
 # Message files
 MSGFILES = \

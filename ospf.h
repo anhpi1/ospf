@@ -2,12 +2,11 @@
 #ifndef __OSPF_H
 #define __OSPF_H
 
-#include <omnetpp.h>
+
 #include <vector>
 #include <map>
 #include <cstdint>
-#include "ospf_info_router.h"
-#include "ospf_packet.h"
+#include "ospf_struct.h"
 
 using namespace omnetpp;
 using namespace std;

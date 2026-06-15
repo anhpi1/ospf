@@ -5,7 +5,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## RULE
 # Tuyệt đối không được bịa thông tin
 # Trước khi suy luận phải kiểm tra file tài liệu docs/ospfv2.txt
-# Mọi thay đổi phải được ghi lại trong "nhật kí kĩ thuật.txt"
+
+## các tài liệu quan trọng
+docs/OMNeT++ - Simulation Manual.html đây là tài liệu hướng dẫn lập trình omnet
+docs/ospfv2.txt đây là tài liệu kĩ thuật dự án triển khai
+docs/plan thinking đây là giời hạn phạm vi mô phỏng
 
 ## Dự án: Mô phỏng OSPFv2 trên OMNeT++ 6.4
 

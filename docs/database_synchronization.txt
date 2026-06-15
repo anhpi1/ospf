@@ -1,0 +1,480 @@
+7.2 Đồng bộ cơ sở dữ liệu (RFC 2328 trang 52-53, 89-106)
+=========================================================
+
+Điều kiện kích hoạt sự kiện
+===========================
+Ngay lập tức sau khi neighbor state chuyển sang 2way, mỗi interface duy trì một luồng trạng thái riêng
+
+  Router A ───────────────────────────────────────── Router B
+
+  +----------------+
+  |     DOWN       | ← trạng thái khởi đầu, chưa biết neighbor
+  +-------+--------+
+          | nhận Hello từ neighbor
+          v
+  +----------------+
+  |     INIT       | ← đã thấy neighbor nhưng chưa bidirectional
+  +-------+--------+
+          | thấy chính mình (self) trong Neighbor list của Hello B gửi đến
+          v
+  +----------------+
+  |    TWO-WAY     | ← bidirectional! Trên P2P → ngay lập tức bắt đầu adjacency
+  +-------+--------+
+          | (trên broadcast: quyết định bởi DR/BDR)
+          v                           ExStart ── Không được! ──→ TWO-WAY
+  +----------------+
+  |   EXSTART      | ← master/slave negotiation (DD với I,M,MS bits)
+  +-------+--------+
+          | NegotiationDone
+          v
+  +----------------+
+  |   EXCHANGE     | ← trao đổi DD packets, liệt kê LSA headers
+  +-------+--------+
+          | ExchangeDone
+          v
+  +----------------+
+  |   LOADING      | ← gửi LSR yêu cầu LSA thiếu, nhận LSU, gửi LSAck
+  +-------+--------+
+          | LoadingDone (link state request list rỗng)
+          v
+  +----------------+
+  |     FULL       | ← adjacency hoàn tất, LSDB đồng bộ
+  +----------------+
+
+  Các sự kiện đặc biệt:
+    SeqNumberMismatch → ExStart (reset DD sequence)
+    BadLSReq          → ExStart    (LSA không tồn tại)
+    One-Way           → Init       (không còn bidirectional)
+    KillNbr           → Down       (neighbor chết, inactivity timer hết hạn)
+    LLDown            → Down       (interface low-level down)
+
+
+Luồng tổng thể
+==============
+
+Nhận Hello từ neighbor → 2WayReceived
+    │
+    ├─ Quyết định có form adjacency không? (Section 10.4)
+    │   └─ P2P: luôn có → chuyển sang ExStart
+    │
+    │   Tính chất:
+    │     Mạng broadcast (ví dụ Ethernet switch) có N router cùng kết nối vào.
+    │     Sau Hello, tất cả đều là neighbor của nhau — mỗi router thấy N-1
+    │     neighbor khác trên cùng interface.
+    │
+    │   Dẫn đến vấn đề:
+    │     Nếu mọi cặp neighbor đều adjacency để đồng bộ LSDB:
+    │       N=4 router: r1↔r2, r1↔r3, r1↔r4, r2↔r3, r2↔r4, r3↔r4 = 6 cặp
+    │       N=10 router: = 45 cặp
+    │     Mỗi cặp adjacency chạy riêng 1 tiến trình Database Sync (DD exchange,
+    │     LS Request, LSU, flooding). Cùng 1 LSA mới xuất hiện → phải gửi riêng
+    │     cho từng adjacency. Lãng phí băng thông và CPU.
+    │
+    │   Cách giải quyết:
+    │     Bầu 1 router làm DR (Designated Router). Nguyên tắc:
+    │       - Chỉ DR adjacency với tất cả router khác
+    │       - Các router còn lại chỉ 2Way với nhau (không adjacency, không
+    │         trao đổi LSDB trực tiếp)
+    │     Khi cần lan truyền LSA mới:
+    │       r1 phát hiện thay đổi → gửi LSU cho DR (adjacency)
+    │       DR nhận → multicast ra tất cả router (adjacency)
+    │       → r2, r3, r4 đều nhận được
+    │     Kết quả: LSDB vẫn đồng bộ toàn bộ, nhưng:
+    │       N=4: 3 adjacency (DR↔r1, DR↔r2, DR↔r3, DR↔r4)
+    │       N=10: 9 adjacency
+    │       Thay vì N×(N-1)/2
+    │
+    ├── GIAI ĐOẠN 1: ExStart — Thương lượng Master/Slave
+    │   │
+    │   ├─ Khởi tạo DD sequence number (giá trị unique, như clock)
+    │   ├─ Tự tuyên bố Master (MS=1)
+    │   ├─ Gửi DD packet RỖNG với (I=1, M=1, MS=1)
+    │   ├─ Nhận DD từ neighbor:
+    │   │   ├─ Nếu neighbor MS=1, I=1, M=1, packet rỗng
+    │   │   │   ├─ Neighbor RouterID > mình → mình là Slave
+    │   │   │   │   └─ Dùng DD seq num của neighbor, gửi ACK
+    │   │   │   └─ Neighbor RouterID < mình → mình là Master
+    │   │   │       └─ Chờ neighbor ACK với seq num của mình
+    │   │   └─ NegotiationDone → Exchange
+    │   │
+    │   └─ Retransmit: gửi lại DD rỗng mỗi RxmtInterval nếu chưa xong
+    │
+    ├── GIAI ĐOẠN 2: Exchange — Trao đổi tóm tắt LSDB
+    │   │
+    │   ├─ Khi vào Exchange: liệt kê TOÀN BỘ LSA trong area LSDB
+    │   │   vào Database Summary List
+    │   │
+    │   ├─ Master: gửi DD packet chứa LSA header từ Summary List
+    │   │   ├─ Slave ACK (echo seq num) → xóa khỏi Summary List
+    │   │   ├─ Slave không ACK sau RxmtInterval → retransmit
+    │   │   └─ Summary List rỗng + M=0 từ Slave → ExchangeDone
+    │   │
+    │   ├─ Slave: nhận DD từ Master
+    │   │   ├─ So sánh từng LSA header với LSDB của mình:
+    │   │   │   ├─ Mình không có LSA này → thêm vào Request List
+    │   │   │   └─ Neighbor có LSA mới hơn → thêm vào Request List
+    │   │   ├─ Gửi DD ACK (cùng seq num), kèm LSA header của mình
+    │   │   └─ Nhận M=0 + gói gửi đi cũng M=0 → ExchangeDone
+    │   │
+    │   └─ Kết thúc: cả 2 bên đều gửi/nhận gói có M=0
+    │
+    └── GIAI ĐOẠN 3: Loading — Xin LSA còn thiếu
+        │
+        ├─ Nếu Request List rỗng → Full luôn (không thiếu gì)
+        │
+        ├─ Gửi Link State Request (type 3):
+        │   ├─ Mỗi request: (LS type, Link State ID, Adv Router)
+        │   ├─ Gửi từng phần của Request List
+        │   └─ Chỉ 1 Request packet outstanding tại 1 thời điểm
+        │
+        ├─ Nhận Link State Update (type 4):
+        │   ├─ Chứa đầy đủ nội dung LSA được yêu cầu
+        │   ├─ Cài đặt LSA vào LSDB
+        │   └─ Xóa LSA đã nhận khỏi Request List
+        │
+        ├─ Retransmit: gửi lại Request sau RxmtInterval nếu chưa nhận Update
+        │
+        └─ Request List rỗng → LoadingDone → Full ✓
+
+
+CHI TIẾT TỪNG GIAI ĐOẠN
+========================
+
+────────────────────────────────────────────────────────────
+GIAI ĐOẠN 1: ExStart — Thương lượng Master/Slave
+(Section 10.3, 10.6, 10.8)
+────────────────────────────────────────────────────────────
+
+Mục đích: Xác định ai điều khiển luồng trao đổi DD.
+Router ID CAO HƠN làm Master.
+
+BƯỚC 1 — Router khởi tạo ExStart (Section 10.3)
+───────────────────────────────────────────────
+
+  Khi neighbor đang ở Init và nhận được 2WayReceived:
+    │
+    ├── 1. Kiểm tra có form adjacency không? (Section 10.4)
+    │       ├── P2P → luôn có → tiếp tục
+    │       └── Broadcast → chỉ khi mình/neighbor là DR hoặc BDR
+    │
+    ├── 2. Tăng DD sequence number
+    │       └── Nếu lần đầu → gán giá trị unique (dùng clock time)
+    │
+    ├── 3. Tự đặt isMaster = true
+    │       └── Đây là tạm thời, sẽ thương lượng lại ở bước sau
+    │
+    ├── 4. Gửi DD packet RỖNG (không chứa LSA header nào)
+    │       ├── I=1 (Init — đây là gói DD đầu tiên)
+    │       ├── M=1 (More — sẽ còn gói tiếp theo)
+    │       └── MS=1 (Master — tự nhận là Master)
+    │
+    └── 5. Lên lịch rxmtTimer = RxmtInterval
+            └── Khi timer cháy mà chưa xong → retransmit DD rỗng
+
+BƯỚC 2 — Nhận DD packet khi đang ở ExStart (Section 10.6)
+─────────────────────────────────────────────────────────
+
+  Nhận DD packet từ neighbor (type=2):
+    │
+    ├── 1. Kiểm tra header OSPF (giống mọi packet, Section 8.2)
+    │       ├── Version=2, Area ID khớp, checksum đúng
+    │       └── Fail → drop
+    │
+    ├── 2. Lưu các trường từ DD vào neighbor data structure:
+    │       ├── lastDdOptions = packet.Options
+    │       ├── lastDdIMs     = packet.I | M | MS bits
+    │       └── so sánh để phát hiện duplicate (giống gói trước)
+    │
+    ├── 3. Kiểm tra Interface MTU
+    │       ├── packet.MTU > interface MTU của mình → drop
+    │       └── OK → tiếp tục
+    │
+    └── 4. Phân tích packet để quyết định Master/Slave:
+            │
+            │   Nếu packet KHÔNG khớp case nào bên dưới → BỎ QUA, chờ retransmit
+            │
+            │   Khi packet KHỚP 1 trong 2 case → thực hiện:
+            │     a. Ghi Options vào neighbor.NeighborOptions
+            │     b. NegotiationDone → chuyển state sang Exchange
+            │     c. Chấp nhận packet là "next in sequence", xử lý tiếp
+            │        trong Exchange (Slave sẽ gửi DD phản hồi ở đây)
+            │
+            ├── CASE A: Neighbor claim Master, mình thành Slave
+            │     Điều kiện: I=1, M=1, MS=1, packet RỖNG
+            │                VÀ neighbor RouterID > RouterID của mình
+            │     │
+            │     ├── Set isMaster = false (mình là Slave)
+            │     └── Lưu DD sequence number = seq từ packet của neighbor
+            │
+            └── CASE B: Neighbor ACK, mình là Master
+                  Điều kiện: I=0, MS=0
+                             VÀ seq trong packet == seq mình đã gửi
+                             VÀ neighbor RouterID < RouterID của mình
+                  │
+                  └── Set isMaster = true (xác nhận mình là Master)
+                      (DD sequence number giữ nguyên, không đổi)
+
+BƯỚC 3 — Retransmit khi chưa có phản hồi (Section 10.8)
+────────────────────────────────────────────────────────
+
+  rxmtTimer cháy khi đang ở ExStart:
+    │
+    └── Gửi lại DD rỗng (I=1, M=1, MS=1) y hệt bước 1
+        └── Schedule lại rxmtTimer = RxmtInterval
+
+VÍ DỤ MINH HỌA — RT1 (ID=1) và RT2 (ID=2)
+───────────────────────────────────────────
+
+  Khởi tạo:
+    RT1: state=ExStart, seq=x, MS=1, gửi DD(I=1,M=1,MS=1,rỗng)
+    RT2: state=ExStart, seq=y, MS=1, gửi DD(I=1,M=1,MS=1,rỗng)
+
+  Trao đổi:
+    │
+    ├── RT1 gửi DD(Seq=x, I=1, M=1, MS=1, rỗng) → RT2
+    │       └── RT2 nhận: I=1,M=1,MS=1,rỗng, RT1_ID=1 < RT2_ID=2
+    │           → RT2 biết mình là Master, nhưng chưa có ACK từ RT1
+    │           → RT2 giữ nguyên state=ExStart, tiếp tục chờ
+    │
+    ├── RT2 gửi DD(Seq=y, I=1, M=1, MS=1, rỗng) → RT1
+    │       └── RT1 nhận: I=1,M=1,MS=1,rỗng, RT2_ID=2 > RT1_ID=1
+    │           → RT1 biết mình là Slave
+    │           → RT1 lưu seq=y, set isMaster=false
+    │           → RT1 gửi ACK: DD(Seq=y, I=0, M=1, MS=0, rỗng)
+    │
+    ├── RT1 gửi DD(Seq=y, I=0, M=1, MS=0, rỗng) → RT2
+    │       └── RT2 nhận: I=0,MS=0,seq=y==y, RT1_ID=1 < RT2_ID=2
+    │           → RT2 biết mình là Master (được Slave ACK)
+    │           → NegotiationDone → Exchange
+    │
+    └── RT2 chuyển sang Exchange → RT1 cũng đã chuyển sang Exchange
+            └── Cả 2 bên đồng bộ: RT2=Master, RT1=Slave, seq=y
+
+────────────────────────────────────────────────────────────
+GIAI ĐOẠN 2: Exchange — Trao đổi tóm tắt LSDB
+(Section 10.3, 10.6, 10.8)
+────────────────────────────────────────────────────────────
+
+Mục đích: Mỗi router gửi toàn bộ LSA HEADER (không phải nội dung đầy đủ)
+cho neighbor biết mình có những LSA nào. Neighbor so sánh với LSDB của mình
+để phát hiện LSA nào mình thiếu hoặc cũ hơn.
+
+Khi vào Exchange (Section 10.3, hành động NegotiationDone):
+  - Liệt kê TOÀN BỘ Router-LSA trong area LSDB vào Database Summary List
+  - Mỗi LSA được mô tả bằng LSA Header (20 byte, xem A.4.1)
+  - Các LSA có LS age = MaxAge → thêm vào retransmission list (để xóa)
+    thay vì Summary List
+
+Vai trò Master (Section 10.8):
+  1. Copy DD sequence number từ neighbor data structure vào DD packet
+  2. Lấy LSA header từ ĐẦU Database Summary List
+  3. Nhồi càng nhiều LSA header càng tốt vào 1 DD packet (không vượt MTU)
+  4. Gửi DD packet đi
+  5. Chờ Slave ACK:
+     a) Slave ACK (echo seq num) → xóa LSA đã gửi khỏi Summary List
+        - Nếu Summary List còn → gửi DD tiếp (seq+1)
+        - Nếu Summary List rỗng + Slave M=0 → ExchangeDone
+     b) Slave không ACK sau RxmtInterval → retransmit gói cũ
+
+Vai trò Slave (Section 10.8):
+  1. Nhận DD từ Master
+  2. Kiểm tra DD sequence number (Section 10.6):
+     - Nếu seq == neighbor seq → gói MỚI → xử lý
+     - Nếu seq == neighbor seq - 1 → DUPLICATE → gửi lại DD cũ
+     - Nếu seq khác → SeqNumberMismatch → quay về ExStart
+  3. Với gói mới:
+     a) So sánh từng LSA header trong DD với LSDB của mình (Section 13.1):
+        - Mình KHÔNG có LSA này → thêm vào Link State Request List
+        - Neighbor có LSA MỚI HƠN → thêm vào Link State Request List
+        - Mình có LSA mới hơn hoặc bằng → không cần xin
+     b) Cập nhật DD sequence number trong neighbor data = seq từ Master
+     c) Gửi DD packet phản hồi (ACK): cùng seq num, kèm LSA header của mình
+     d) Nếu Master M=0 và gói mình sắp gửi cũng M=0 → ExchangeDone
+
+Kết thúc Exchange:
+  - Cả 2 bên đều đã gửi và nhận DD packet với M=0
+  - Slave thường phát hiện ExchangeDone TRƯỚC Master
+  - ExchangeDone → nếu Request List rỗng → Full
+                   → nếu Request List không rỗng → Loading
+
+So sánh LSA mới hơn (Section 13.1):
+  Một LSA instance được coi là "mới hơn" nếu:
+  1. LS sequence number lớn hơn (so sánh signed int32, không gian vòng)
+  2. Cùng seq num → LS checksum lớn hơn
+  3. Cùng checksum → LS age == MaxAge (3600s) → instance này mới hơn
+  4. Cùng checksum, khác MaxAge → age chênh > MaxAgeDiff (900s) → nhỏ hơn mới hơn
+  5. Còn lại → bằng nhau
+
+────────────────────────────────────────────────────────────
+GIAI ĐOẠN 3: Loading — Xin LSA còn thiếu
+(Section 10.3, 10.7, 10.9)
+────────────────────────────────────────────────────────────
+
+Mục đích: Gửi Link State Request để lấy NỘI DUNG ĐẦY ĐỦ của những LSA
+mà mình phát hiện là thiếu hoặc cũ hơn trong giai đoạn Exchange.
+
+Gửi Link State Request (Section 10.9):
+  1. Lấy các mục từ ĐẦU Link State Request List
+  2. Mỗi mục: (LS type, Link State ID, Advertising Router)
+  3. Đóng gói vào Link State Request packet (type 3)
+  4. Gửi đi
+  5. Chỉ 1 Request packet outstanding tại 1 thời điểm
+  6. Retransmit sau RxmtInterval nếu chưa nhận Update
+
+Nhận Link State Update trả lời (Section 10.7):
+  1. Với mỗi LSA trong Update:
+     - Tìm LSA trong LSDB của mình
+     - Cài đặt LSA mới vào LSDB (Section 13.2)
+     - Gửi Link State Acknowledgment (type 5) nếu cần
+  2. Xóa LSA đã nhận khỏi Request List
+  3. Nếu Request List còn → gửi Request tiếp
+  4. Request List rỗng + đang ở Loading → LoadingDone → Full
+
+Xử lý Link State Request từ neighbor (Section 10.7):
+  - Chỉ chấp nhận khi neighbor ở Exchange, Loading, hoặc Full
+  - Với mỗi LSA được yêu cầu:
+    - Tìm trong LSDB của mình
+    - Copy vào Link State Update (type 4) để gửi trả lời
+    - KHÔNG thêm vào retransmission list (chỉ flooding mới thêm)
+  - Nếu không tìm thấy LSA → BadLSReq → quay về ExStart
+
+Kết thúc:
+  - Request List rỗng + Exchange đã hoàn thành → LoadingDone → Full
+  - Full = adjacency hoàn chỉnh, sẽ được quảng bá trong Router-LSA
+
+
+CẤU TRÚC GÓI TIN
+=================
+
+Database Description Packet (OSPF type 2, A.3.3)
+──────────────────────────────────────────────────
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   Version #   |       2       |         Packet length         |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                          Router ID                            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                           Area ID                             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |           Checksum            |             AuType            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Authentication                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Authentication                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |         Interface MTU         |    Options    |0|0|0|0|0|I|M|MS
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                     DD sequence number                        |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                                                               |
+    +-                                                             -+
+    |                      Các LSA Header                          |
+    +-                                                             -+
+    |                              ...                              |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  Header OSPF (24 byte): version=2, type=2, length, routerId, areaId,
+                         checksum, authType(16), authData(64)
+  Interface MTU (16 bit): MTU của interface gửi (0 nếu virtual link)
+  Options (8 bit):      Giống như trong Hello (E-bit = bit 2)
+  I-bit (bit 1):        Init bit — =1 nếu là gói DD đầu tiên
+  M-bit (bit 0):        More bit — =1 nếu còn DD packet nữa
+  MS-bit (bit 2):       Master/Slave — =1 nếu router là Master
+  DD sequence (32 bit): Số thứ tự, bắt đầu từ giá trị unique
+  Phần còn lại:         Danh sách LSA Header (mỗi cái 20 byte)
+
+Link State Request Packet (OSPF type 3, A.3.4)
+────────────────────────────────────────────────
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   Version #   |       3       |         Packet length         |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                          Router ID                            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                           Area ID                             |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |           Checksum            |             AuType            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Authentication                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Authentication                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                          LS type                              |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                       Link State ID                           |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                      Advertising Router                       |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                              ...                              |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+  Header OSPF (24 byte): version=2, type=3, length, routerId, areaId...
+  Mỗi request (12 byte): LS type (32-bit), Link State ID (32-bit),
+                          Advertising Router (32-bit)
+  Có thể chứa nhiều request trong 1 packet
+
+LSA Header (A.4.1) — 20 byte, dùng trong DD và LSAck
+──────────────────────────────────────────────────────
+
+     0                   1                   2                   3
+     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |            LS age             |    Options    |    LS type    |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                        Link State ID                          |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                     Advertising Router                        |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                     LS sequence number                        |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |         LS checksum           |             length            |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+
+
+DỮ LIỆU CẦN THÊM VÀO NEIGHBORDATA
+===================================
+
+Hiện tại NeighborData đã có các trường liên quan:
+  - isMaster          (Master/Slave flag)
+  - ddSequenceNumber  (DD sequence number)
+  - lastDdOptions     (Options từ DD cuối cùng)
+  - lastDdIMs         (I+M+MS bits từ DD cuối cùng)
+
+Cần bổ sung:
+  - databaseSummaryList      vector<LsaHeader> — danh sách LSA cần gửi trong DD
+  - linkStateRequestList     vector<LsaHeader> — danh sách LSA cần xin
+  - linkStateRetransList     vector<LsaHeader> — danh sách LSA đang chờ ACK
+                             (dùng cho flooding, sẽ cần sau)
+
+Cần bổ sung timer:
+  - rxmtTimer                cMessage* — timer retransmit DD/LS Request
+                             (interval = InterfaceData::rxmtInterval)
+
+
+TÓM TẮT CHO P2P (PHẠM VI DỰ ÁN)
+=================================
+
+1. Hello → 2Way → luôn adjacency trên P2P → ExStart
+2. ExStart: thương lượng Master/Slave qua DD rỗng (I=1,M=1,MS=1)
+   - Router ID cao hơn → Master
+3. Exchange: Master gửi LSA header, Slave ACK + gửi LSA header của mình
+   - Slave so sánh từng header với LSDB, phát hiện LSA thiếu/cũ hơn
+4. ExchangeDone → Loading (nếu có LSA cần xin) hoặc Full (nếu không thiếu)
+5. Loading: gửi LS Request, nhận LS Update, cài vào LSDB
+6. Request List rỗng → LoadingDone → Full
+7. Bỏ qua DR/BDR (P2P không có)
+8. Bỏ qua Network-LSA, Summary-LSA, AS-external-LSA (ngoài scope)
+
+Timer cần quản lý:
+  - helloTimer: đã có (định kỳ gửi Hello)
+  - rxmtTimer:  mới (retransmit DD và LS Request, interval = RxmtInterval)
+
+Sự kiện mới xử lý trong handleMessage:
+  - Nhận DD packet (type 2)   → processDD()
+  - Nhận LS Request (type 3)  → processLSReq()
+  - Nhận LS Update (type 4)   → processLSU()
+  - Timer rxmtTimer           → retransmit DD hoặc LS Request

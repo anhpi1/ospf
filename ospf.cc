@@ -19,8 +19,7 @@ void routerOspf::initialize()
     }
 
     // Đặt lịch gửi Hello định kỳ
-    helloTimer = new cMessage("helloBaoThuc");
-    helloTimer->setKind(1);  // đánh dấu timer để phân biệt màu
+    helloTimer = new cMessage("helloTimer");
     scheduleAt(simTime() + state->interfaces[0].helloInterval, helloTimer);
 }
 
@@ -45,7 +44,7 @@ void routerOspf::handleMessage(cMessage *msg)
         // Tách header + kiểm tra (RFC 2328 Section 8.2)
         headerOspf hdr;
         std::vector<uint8_t> data;
-        uint8_t pktType = OspfMess::parsePacket((OspfMess*)msg, iface, hdr, data);
+        uint8_t pktType = OspfMess::parse((Mess*)msg, iface, hdr, data);
         if (pktType == 0) {
             delete msg;
             return;
@@ -54,6 +53,7 @@ void routerOspf::handleMessage(cMessage *msg)
         // Dispatch theo type
         if (pktType == 1) {
             helloData::processHello(hdr, data, iface, routerId);
+            
         }
         // TODO: type 2=DD, 3=LSR, 4=LSU, 5=LSAck
         delete msg;

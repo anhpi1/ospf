@@ -1,5 +1,5 @@
 //
-// Generated file, do not edit! Created by opp_msgtool 6.4 from ospf.msg.
+// Generated file, do not edit! Created by opp_msgtool 6.4 from /home/k/omnetpp-6.4.0/workspace/ospf/ospf.msg.
 //
 
 // Disable warnings about unused variables, empty switch stmts, etc:
@@ -171,23 +171,23 @@ bool fromStringIfExtractable(T& t, const char *s) {
     return false;
 }
 
-Register_Class(OspfMess)
+Register_Class(Mess)
 
-OspfMess::OspfMess(const char *name, short kind) : ::omnetpp::cMessage(name, kind)
+Mess::Mess(const char *name, short kind) : ::omnetpp::cMessage(name, kind)
 {
 }
 
-OspfMess::OspfMess(const OspfMess& other) : ::omnetpp::cMessage(other)
+Mess::Mess(const Mess& other) : ::omnetpp::cMessage(other)
 {
     copy(other);
 }
 
-OspfMess::~OspfMess()
+Mess::~Mess()
 {
     delete [] this->payload;
 }
 
-OspfMess& OspfMess::operator=(const OspfMess& other)
+Mess& Mess::operator=(const Mess& other)
 {
     if (this == &other) return *this;
     ::omnetpp::cMessage::operator=(other);
@@ -195,17 +195,8 @@ OspfMess& OspfMess::operator=(const OspfMess& other)
     return *this;
 }
 
-void OspfMess::copy(const OspfMess& other)
+void Mess::copy(const Mess& other)
 {
-    this->version = other.version;
-    this->type = other.type;
-    this->length = other.length;
-    this->routerId = other.routerId;
-    this->areaId = other.areaId;
-    this->checksum = other.checksum;
-    this->authType = other.authType;
-    this->authData1 = other.authData1;
-    this->authData2 = other.authData2;
     delete [] this->payload;
     this->payload = (other.payload_arraysize==0) ? nullptr : new uint8_t[other.payload_arraysize];
     payload_arraysize = other.payload_arraysize;
@@ -214,34 +205,16 @@ void OspfMess::copy(const OspfMess& other)
     }
 }
 
-void OspfMess::parsimPack(omnetpp::cCommBuffer *b) const
+void Mess::parsimPack(omnetpp::cCommBuffer *b) const
 {
     ::omnetpp::cMessage::parsimPack(b);
-    doParsimPacking(b,this->version);
-    doParsimPacking(b,this->type);
-    doParsimPacking(b,this->length);
-    doParsimPacking(b,this->routerId);
-    doParsimPacking(b,this->areaId);
-    doParsimPacking(b,this->checksum);
-    doParsimPacking(b,this->authType);
-    doParsimPacking(b,this->authData1);
-    doParsimPacking(b,this->authData2);
     b->pack(payload_arraysize);
     doParsimArrayPacking(b,this->payload,payload_arraysize);
 }
 
-void OspfMess::parsimUnpack(omnetpp::cCommBuffer *b)
+void Mess::parsimUnpack(omnetpp::cCommBuffer *b)
 {
     ::omnetpp::cMessage::parsimUnpack(b);
-    doParsimUnpacking(b,this->version);
-    doParsimUnpacking(b,this->type);
-    doParsimUnpacking(b,this->length);
-    doParsimUnpacking(b,this->routerId);
-    doParsimUnpacking(b,this->areaId);
-    doParsimUnpacking(b,this->checksum);
-    doParsimUnpacking(b,this->authType);
-    doParsimUnpacking(b,this->authData1);
-    doParsimUnpacking(b,this->authData2);
     delete [] this->payload;
     b->unpack(payload_arraysize);
     if (payload_arraysize == 0) {
@@ -252,108 +225,18 @@ void OspfMess::parsimUnpack(omnetpp::cCommBuffer *b)
     }
 }
 
-uint8_t OspfMess::getVersion() const
-{
-    return this->version;
-}
-
-void OspfMess::setVersion(uint8_t version)
-{
-    this->version = version;
-}
-
-uint8_t OspfMess::getType() const
-{
-    return this->type;
-}
-
-void OspfMess::setType(uint8_t type)
-{
-    this->type = type;
-}
-
-uint16_t OspfMess::getLength() const
-{
-    return this->length;
-}
-
-void OspfMess::setLength(uint16_t length)
-{
-    this->length = length;
-}
-
-uint32_t OspfMess::getRouterId() const
-{
-    return this->routerId;
-}
-
-void OspfMess::setRouterId(uint32_t routerId)
-{
-    this->routerId = routerId;
-}
-
-uint32_t OspfMess::getAreaId() const
-{
-    return this->areaId;
-}
-
-void OspfMess::setAreaId(uint32_t areaId)
-{
-    this->areaId = areaId;
-}
-
-uint16_t OspfMess::getChecksum() const
-{
-    return this->checksum;
-}
-
-void OspfMess::setChecksum(uint16_t checksum)
-{
-    this->checksum = checksum;
-}
-
-uint16_t OspfMess::getAuthType() const
-{
-    return this->authType;
-}
-
-void OspfMess::setAuthType(uint16_t authType)
-{
-    this->authType = authType;
-}
-
-uint32_t OspfMess::getAuthData1() const
-{
-    return this->authData1;
-}
-
-void OspfMess::setAuthData1(uint32_t authData1)
-{
-    this->authData1 = authData1;
-}
-
-uint32_t OspfMess::getAuthData2() const
-{
-    return this->authData2;
-}
-
-void OspfMess::setAuthData2(uint32_t authData2)
-{
-    this->authData2 = authData2;
-}
-
-size_t OspfMess::getPayloadArraySize() const
+size_t Mess::getPayloadArraySize() const
 {
     return payload_arraysize;
 }
 
-uint8_t OspfMess::getPayload(size_t k) const
+uint8_t Mess::getPayload(size_t k) const
 {
     if (k >= payload_arraysize) throw omnetpp::cRuntimeError("Array of size %lu indexed by %lu", (unsigned long)payload_arraysize, (unsigned long)k);
     return this->payload[k];
 }
 
-void OspfMess::setPayloadArraySize(size_t newSize)
+void Mess::setPayloadArraySize(size_t newSize)
 {
     uint8_t *payload2 = (newSize==0) ? nullptr : new uint8_t[newSize];
     size_t minSize = payload_arraysize < newSize ? payload_arraysize : newSize;
@@ -366,13 +249,13 @@ void OspfMess::setPayloadArraySize(size_t newSize)
     payload_arraysize = newSize;
 }
 
-void OspfMess::setPayload(size_t k, uint8_t payload)
+void Mess::setPayload(size_t k, uint8_t payload)
 {
     if (k >= payload_arraysize) throw omnetpp::cRuntimeError("Array of size %lu indexed by %lu", (unsigned long)payload_arraysize, (unsigned long)k);
     this->payload[k] = payload;
 }
 
-void OspfMess::insertPayload(size_t k, uint8_t payload)
+void Mess::insertPayload(size_t k, uint8_t payload)
 {
     if (k > payload_arraysize) throw omnetpp::cRuntimeError("Array of size %lu indexed by %lu", (unsigned long)payload_arraysize, (unsigned long)k);
     size_t newSize = payload_arraysize + 1;
@@ -388,12 +271,12 @@ void OspfMess::insertPayload(size_t k, uint8_t payload)
     payload_arraysize = newSize;
 }
 
-void OspfMess::appendPayload(uint8_t payload)
+void Mess::appendPayload(uint8_t payload)
 {
     insertPayload(payload_arraysize, payload);
 }
 
-void OspfMess::erasePayload(size_t k)
+void Mess::erasePayload(size_t k)
 {
     if (k >= payload_arraysize) throw omnetpp::cRuntimeError("Array of size %lu indexed by %lu", (unsigned long)payload_arraysize, (unsigned long)k);
     size_t newSize = payload_arraysize - 1;
@@ -408,25 +291,16 @@ void OspfMess::erasePayload(size_t k)
     payload_arraysize = newSize;
 }
 
-class OspfMessDescriptor : public omnetpp::cClassDescriptor
+class MessDescriptor : public omnetpp::cClassDescriptor
 {
   private:
     mutable const char **propertyNames;
     enum FieldConstants {
-        FIELD_version,
-        FIELD_type,
-        FIELD_length,
-        FIELD_routerId,
-        FIELD_areaId,
-        FIELD_checksum,
-        FIELD_authType,
-        FIELD_authData1,
-        FIELD_authData2,
         FIELD_payload,
     };
   public:
-    OspfMessDescriptor();
-    virtual ~OspfMessDescriptor();
+    MessDescriptor();
+    virtual ~MessDescriptor();
 
     virtual bool doesSupport(omnetpp::cObject *obj) const override;
     virtual const char **getPropertyNames() const override;
@@ -454,24 +328,24 @@ class OspfMessDescriptor : public omnetpp::cClassDescriptor
     virtual void setFieldStructValuePointer(omnetpp::any_ptr object, int field, int i, omnetpp::any_ptr ptr) const override;
 };
 
-Register_ClassDescriptor(OspfMessDescriptor)
+Register_ClassDescriptor(MessDescriptor)
 
-OspfMessDescriptor::OspfMessDescriptor() : omnetpp::cClassDescriptor(omnetpp::opp_typename(typeid(OspfMess)), "omnetpp::cMessage")
+MessDescriptor::MessDescriptor() : omnetpp::cClassDescriptor(omnetpp::opp_typename(typeid(Mess)), "omnetpp::cMessage")
 {
     propertyNames = nullptr;
 }
 
-OspfMessDescriptor::~OspfMessDescriptor()
+MessDescriptor::~MessDescriptor()
 {
     delete[] propertyNames;
 }
 
-bool OspfMessDescriptor::doesSupport(omnetpp::cObject *obj) const
+bool MessDescriptor::doesSupport(omnetpp::cObject *obj) const
 {
-    return dynamic_cast<OspfMess *>(obj)!=nullptr;
+    return dynamic_cast<Mess *>(obj)!=nullptr;
 }
 
-const char **OspfMessDescriptor::getPropertyNames() const
+const char **MessDescriptor::getPropertyNames() const
 {
     if (!propertyNames) {
         static const char *names[] = {  nullptr };
@@ -482,32 +356,32 @@ const char **OspfMessDescriptor::getPropertyNames() const
     return propertyNames;
 }
 
-const char *OspfMessDescriptor::getProperty(const char *propertyName) const
+const char *MessDescriptor::getProperty(const char *propertyName) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     return base ? base->getProperty(propertyName) : nullptr;
 }
 
-std::string OspfMessDescriptor::getValueAsString(omnetpp::any_ptr object) const
+std::string MessDescriptor::getValueAsString(omnetpp::any_ptr object) const
 {
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     return ((cObject*)pp)->str();
 }
 
-void OspfMessDescriptor::setValueAsString(omnetpp::any_ptr object, const char *value) const
+void MessDescriptor::setValueAsString(omnetpp::any_ptr object, const char *value) const
 {
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     if (!fromStringIfExtractable(*pp, value))
         cClassDescriptor::setValueAsString(object, value);
 }
 
-int OspfMessDescriptor::getFieldCount() const
+int MessDescriptor::getFieldCount() const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
-    return base ? 10+base->getFieldCount() : 10;
+    return base ? 1+base->getFieldCount() : 1;
 }
 
-unsigned int OspfMessDescriptor::getFieldTypeFlags(int field) const
+unsigned int MessDescriptor::getFieldTypeFlags(int field) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -516,21 +390,12 @@ unsigned int OspfMessDescriptor::getFieldTypeFlags(int field) const
         field -= base->getFieldCount();
     }
     static unsigned int fieldTypeFlags[] = {
-        FD_ISEDITABLE,    // FIELD_version
-        FD_ISEDITABLE,    // FIELD_type
-        FD_ISEDITABLE,    // FIELD_length
-        FD_ISEDITABLE,    // FIELD_routerId
-        FD_ISEDITABLE,    // FIELD_areaId
-        FD_ISEDITABLE,    // FIELD_checksum
-        FD_ISEDITABLE,    // FIELD_authType
-        FD_ISEDITABLE,    // FIELD_authData1
-        FD_ISEDITABLE,    // FIELD_authData2
         FD_ISARRAY | FD_ISEDITABLE | FD_ISRESIZABLE,    // FIELD_payload
     };
-    return (field >= 0 && field < 10) ? fieldTypeFlags[field] : 0;
+    return (field >= 0 && field < 1) ? fieldTypeFlags[field] : 0;
 }
 
-const char *OspfMessDescriptor::getFieldName(int field) const
+const char *MessDescriptor::getFieldName(int field) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -539,38 +404,20 @@ const char *OspfMessDescriptor::getFieldName(int field) const
         field -= base->getFieldCount();
     }
     static const char *fieldNames[] = {
-        "version",
-        "type",
-        "length",
-        "routerId",
-        "areaId",
-        "checksum",
-        "authType",
-        "authData1",
-        "authData2",
         "payload",
     };
-    return (field >= 0 && field < 10) ? fieldNames[field] : nullptr;
+    return (field >= 0 && field < 1) ? fieldNames[field] : nullptr;
 }
 
-int OspfMessDescriptor::findField(const char *fieldName) const
+int MessDescriptor::findField(const char *fieldName) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     int baseIndex = base ? base->getFieldCount() : 0;
-    if (strcmp(fieldName, "version") == 0) return baseIndex + 0;
-    if (strcmp(fieldName, "type") == 0) return baseIndex + 1;
-    if (strcmp(fieldName, "length") == 0) return baseIndex + 2;
-    if (strcmp(fieldName, "routerId") == 0) return baseIndex + 3;
-    if (strcmp(fieldName, "areaId") == 0) return baseIndex + 4;
-    if (strcmp(fieldName, "checksum") == 0) return baseIndex + 5;
-    if (strcmp(fieldName, "authType") == 0) return baseIndex + 6;
-    if (strcmp(fieldName, "authData1") == 0) return baseIndex + 7;
-    if (strcmp(fieldName, "authData2") == 0) return baseIndex + 8;
-    if (strcmp(fieldName, "payload") == 0) return baseIndex + 9;
+    if (strcmp(fieldName, "payload") == 0) return baseIndex + 0;
     return base ? base->findField(fieldName) : -1;
 }
 
-const char *OspfMessDescriptor::getFieldTypeString(int field) const
+const char *MessDescriptor::getFieldTypeString(int field) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -579,21 +426,12 @@ const char *OspfMessDescriptor::getFieldTypeString(int field) const
         field -= base->getFieldCount();
     }
     static const char *fieldTypeStrings[] = {
-        "uint8_t",    // FIELD_version
-        "uint8_t",    // FIELD_type
-        "uint16_t",    // FIELD_length
-        "uint32_t",    // FIELD_routerId
-        "uint32_t",    // FIELD_areaId
-        "uint16_t",    // FIELD_checksum
-        "uint16_t",    // FIELD_authType
-        "uint32_t",    // FIELD_authData1
-        "uint32_t",    // FIELD_authData2
         "uint8_t",    // FIELD_payload
     };
-    return (field >= 0 && field < 10) ? fieldTypeStrings[field] : nullptr;
+    return (field >= 0 && field < 1) ? fieldTypeStrings[field] : nullptr;
 }
 
-const char **OspfMessDescriptor::getFieldPropertyNames(int field) const
+const char **MessDescriptor::getFieldPropertyNames(int field) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -606,7 +444,7 @@ const char **OspfMessDescriptor::getFieldPropertyNames(int field) const
     }
 }
 
-const char *OspfMessDescriptor::getFieldProperty(int field, const char *propertyName) const
+const char *MessDescriptor::getFieldProperty(int field, const char *propertyName) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -619,7 +457,7 @@ const char *OspfMessDescriptor::getFieldProperty(int field, const char *property
     }
 }
 
-int OspfMessDescriptor::getFieldArraySize(omnetpp::any_ptr object, int field) const
+int MessDescriptor::getFieldArraySize(omnetpp::any_ptr object, int field) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -627,14 +465,14 @@ int OspfMessDescriptor::getFieldArraySize(omnetpp::any_ptr object, int field) co
             return base->getFieldArraySize(object, field);
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
         case FIELD_payload: return pp->getPayloadArraySize();
         default: return 0;
     }
 }
 
-void OspfMessDescriptor::setFieldArraySize(omnetpp::any_ptr object, int field, int size) const
+void MessDescriptor::setFieldArraySize(omnetpp::any_ptr object, int field, int size) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -644,14 +482,14 @@ void OspfMessDescriptor::setFieldArraySize(omnetpp::any_ptr object, int field, i
         }
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
         case FIELD_payload: pp->setPayloadArraySize(size); break;
-        default: throw omnetpp::cRuntimeError("Cannot set array size of field %d of class 'OspfMess'", field);
+        default: throw omnetpp::cRuntimeError("Cannot set array size of field %d of class 'Mess'", field);
     }
 }
 
-const char *OspfMessDescriptor::getFieldDynamicTypeString(omnetpp::any_ptr object, int field, int i) const
+const char *MessDescriptor::getFieldDynamicTypeString(omnetpp::any_ptr object, int field, int i) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -659,13 +497,13 @@ const char *OspfMessDescriptor::getFieldDynamicTypeString(omnetpp::any_ptr objec
             return base->getFieldDynamicTypeString(object,field,i);
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
         default: return nullptr;
     }
 }
 
-std::string OspfMessDescriptor::getFieldValueAsString(omnetpp::any_ptr object, int field, int i) const
+std::string MessDescriptor::getFieldValueAsString(omnetpp::any_ptr object, int field, int i) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -673,23 +511,14 @@ std::string OspfMessDescriptor::getFieldValueAsString(omnetpp::any_ptr object, i
             return base->getFieldValueAsString(object,field,i);
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
-        case FIELD_version: return ulong2string(pp->getVersion());
-        case FIELD_type: return ulong2string(pp->getType());
-        case FIELD_length: return ulong2string(pp->getLength());
-        case FIELD_routerId: return ulong2string(pp->getRouterId());
-        case FIELD_areaId: return ulong2string(pp->getAreaId());
-        case FIELD_checksum: return ulong2string(pp->getChecksum());
-        case FIELD_authType: return ulong2string(pp->getAuthType());
-        case FIELD_authData1: return ulong2string(pp->getAuthData1());
-        case FIELD_authData2: return ulong2string(pp->getAuthData2());
         case FIELD_payload: return ulong2string(pp->getPayload(i));
         default: return "";
     }
 }
 
-void OspfMessDescriptor::setFieldValueAsString(omnetpp::any_ptr object, int field, int i, const char *value) const
+void MessDescriptor::setFieldValueAsString(omnetpp::any_ptr object, int field, int i, const char *value) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -699,23 +528,14 @@ void OspfMessDescriptor::setFieldValueAsString(omnetpp::any_ptr object, int fiel
         }
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
-        case FIELD_version: pp->setVersion(string2ulong(value)); break;
-        case FIELD_type: pp->setType(string2ulong(value)); break;
-        case FIELD_length: pp->setLength(string2ulong(value)); break;
-        case FIELD_routerId: pp->setRouterId(string2ulong(value)); break;
-        case FIELD_areaId: pp->setAreaId(string2ulong(value)); break;
-        case FIELD_checksum: pp->setChecksum(string2ulong(value)); break;
-        case FIELD_authType: pp->setAuthType(string2ulong(value)); break;
-        case FIELD_authData1: pp->setAuthData1(string2ulong(value)); break;
-        case FIELD_authData2: pp->setAuthData2(string2ulong(value)); break;
         case FIELD_payload: pp->setPayload(i,string2ulong(value)); break;
-        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'OspfMess'", field);
+        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'Mess'", field);
     }
 }
 
-omnetpp::cValue OspfMessDescriptor::getFieldValue(omnetpp::any_ptr object, int field, int i) const
+omnetpp::cValue MessDescriptor::getFieldValue(omnetpp::any_ptr object, int field, int i) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -723,23 +543,14 @@ omnetpp::cValue OspfMessDescriptor::getFieldValue(omnetpp::any_ptr object, int f
             return base->getFieldValue(object,field,i);
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
-        case FIELD_version: return (omnetpp::intval_t)(pp->getVersion());
-        case FIELD_type: return (omnetpp::intval_t)(pp->getType());
-        case FIELD_length: return (omnetpp::intval_t)(pp->getLength());
-        case FIELD_routerId: return (omnetpp::intval_t)(pp->getRouterId());
-        case FIELD_areaId: return (omnetpp::intval_t)(pp->getAreaId());
-        case FIELD_checksum: return (omnetpp::intval_t)(pp->getChecksum());
-        case FIELD_authType: return (omnetpp::intval_t)(pp->getAuthType());
-        case FIELD_authData1: return (omnetpp::intval_t)(pp->getAuthData1());
-        case FIELD_authData2: return (omnetpp::intval_t)(pp->getAuthData2());
         case FIELD_payload: return (omnetpp::intval_t)(pp->getPayload(i));
-        default: throw omnetpp::cRuntimeError("Cannot return field %d of class 'OspfMess' as cValue -- field index out of range?", field);
+        default: throw omnetpp::cRuntimeError("Cannot return field %d of class 'Mess' as cValue -- field index out of range?", field);
     }
 }
 
-void OspfMessDescriptor::setFieldValue(omnetpp::any_ptr object, int field, int i, const omnetpp::cValue& value) const
+void MessDescriptor::setFieldValue(omnetpp::any_ptr object, int field, int i, const omnetpp::cValue& value) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -749,23 +560,14 @@ void OspfMessDescriptor::setFieldValue(omnetpp::any_ptr object, int field, int i
         }
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
-        case FIELD_version: pp->setVersion(omnetpp::checked_int_cast<uint8_t>(value.intValue())); break;
-        case FIELD_type: pp->setType(omnetpp::checked_int_cast<uint8_t>(value.intValue())); break;
-        case FIELD_length: pp->setLength(omnetpp::checked_int_cast<uint16_t>(value.intValue())); break;
-        case FIELD_routerId: pp->setRouterId(omnetpp::checked_int_cast<uint32_t>(value.intValue())); break;
-        case FIELD_areaId: pp->setAreaId(omnetpp::checked_int_cast<uint32_t>(value.intValue())); break;
-        case FIELD_checksum: pp->setChecksum(omnetpp::checked_int_cast<uint16_t>(value.intValue())); break;
-        case FIELD_authType: pp->setAuthType(omnetpp::checked_int_cast<uint16_t>(value.intValue())); break;
-        case FIELD_authData1: pp->setAuthData1(omnetpp::checked_int_cast<uint32_t>(value.intValue())); break;
-        case FIELD_authData2: pp->setAuthData2(omnetpp::checked_int_cast<uint32_t>(value.intValue())); break;
         case FIELD_payload: pp->setPayload(i,omnetpp::checked_int_cast<uint8_t>(value.intValue())); break;
-        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'OspfMess'", field);
+        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'Mess'", field);
     }
 }
 
-const char *OspfMessDescriptor::getFieldStructName(int field) const
+const char *MessDescriptor::getFieldStructName(int field) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -778,7 +580,7 @@ const char *OspfMessDescriptor::getFieldStructName(int field) const
     };
 }
 
-omnetpp::any_ptr OspfMessDescriptor::getFieldStructValuePointer(omnetpp::any_ptr object, int field, int i) const
+omnetpp::any_ptr MessDescriptor::getFieldStructValuePointer(omnetpp::any_ptr object, int field, int i) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -786,13 +588,13 @@ omnetpp::any_ptr OspfMessDescriptor::getFieldStructValuePointer(omnetpp::any_ptr
             return base->getFieldStructValuePointer(object, field, i);
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
         default: return omnetpp::any_ptr(nullptr);
     }
 }
 
-void OspfMessDescriptor::setFieldStructValuePointer(omnetpp::any_ptr object, int field, int i, omnetpp::any_ptr ptr) const
+void MessDescriptor::setFieldStructValuePointer(omnetpp::any_ptr object, int field, int i, omnetpp::any_ptr ptr) const
 {
     omnetpp::cClassDescriptor *base = getBaseClassDescriptor();
     if (base) {
@@ -802,9 +604,9 @@ void OspfMessDescriptor::setFieldStructValuePointer(omnetpp::any_ptr object, int
         }
         field -= base->getFieldCount();
     }
-    OspfMess *pp = omnetpp::fromAnyPtr<OspfMess>(object); (void)pp;
+    Mess *pp = omnetpp::fromAnyPtr<Mess>(object); (void)pp;
     switch (field) {
-        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'OspfMess'", field);
+        default: throw omnetpp::cRuntimeError("Cannot set field %d of class 'Mess'", field);
     }
 }
 

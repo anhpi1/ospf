@@ -1,8 +1,8 @@
 version 3
-run General-0-20260615-00:03:12-457214
+run General-0-20260615-18:03:49-298787
 attr configname General
-attr datetime 20260615-00:03:12
-attr datetimef 20260615-000312
+attr datetime 20260615-18:03:49
+attr datetimef 20260615-180349
 attr experiment General
 attr inifile omnetpp.ini
 attr iterationvars ""
@@ -10,14 +10,14 @@ attr iterationvarsd ""
 attr iterationvarsf ""
 attr measurement ""
 attr network Ospf
-attr processid 457214
+attr processid 298787
 attr repetition 0
 attr replication #0
 attr resultdir results
 attr runnumber 0
 attr seedset 0
 config network Ospf
-config sim-time-limit 200s
+config sim-time-limit 20000s
 config record-eventlog true
 
 par Ospf.r1 typename "\"routerOspf\""
