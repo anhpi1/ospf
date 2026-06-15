@@ -44,6 +44,8 @@ viết xử lý header
 
 
 viết lập lịch gửi gói tin hello
+    Router Priority = 0 (P2P không cần DR/BDR)
+
     Vấn đề: OMNeT++ không có thread, làm sao gửi Hello định kỳ mỗi 10s?
     Hệ thống thật cần 2 thread: 1 thread while+sleep gửi, 1 thread nhận.
     Nhưng OMNeT++ là discrete event simulation — không thread, không sleep, không while.
@@ -74,3 +76,8 @@ viết gửi gói tin cho bước Exstart
 
 viết xử lý gói tin cho bước Exstart
 
+tiếp tục ngồi sửa cấu trúc dữ Liệu
+
+viết cho trạng thái Exchange
+
+Viết cho trạng thái loading

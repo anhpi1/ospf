@@ -150,6 +150,8 @@ Router ID CAO HƠN làm Master.
 
 BƯỚC 1 — Router khởi tạo ExStart (Section 10.3)
 ───────────────────────────────────────────────
+  Class cần dùng: databaseDescriptionData (type 2) — gói DD rỗng
+                  NeighborData — isMaster, ddSequenceNumber, rxmtTimer
 
   Khi neighbor đang ở Init và nhận được 2WayReceived:
     │
@@ -255,49 +257,121 @@ GIAI ĐOẠN 2: Exchange — Trao đổi tóm tắt LSDB
 (Section 10.3, 10.6, 10.8)
 ────────────────────────────────────────────────────────────
 
-Mục đích: Mỗi router gửi toàn bộ LSA HEADER (không phải nội dung đầy đủ)
-cho neighbor biết mình có những LSA nào. Neighbor so sánh với LSDB của mình
-để phát hiện LSA nào mình thiếu hoặc cũ hơn.
+Mục đích: Mỗi router gửi toàn bộ LSA HEADER cho neighbor biết mình có
+những LSA nào. Neighbor so sánh với LSDB của mình để phát hiện LSA nào
+mình thiếu hoặc cũ hơn.
 
-Khi vào Exchange (Section 10.3, hành động NegotiationDone):
-  - Liệt kê TOÀN BỘ Router-LSA trong area LSDB vào Database Summary List
-  - Mỗi LSA được mô tả bằng LSA Header (20 byte, xem A.4.1)
-  - Các LSA có LS age = MaxAge → thêm vào retransmission list (để xóa)
-    thay vì Summary List
+Khi vào Exchange (NegotiationDone):
+  - nbr->state = NBR_EXCHANGE → bắt đầu Exchange
+  - Cả Master và Slave đều cần gửi LSA headers của mình cho nhau
 
-Vai trò Master (Section 10.8):
-  1. Copy DD sequence number từ neighbor data structure vào DD packet
-  2. Lấy LSA header từ ĐẦU Database Summary List
-  3. Nhồi càng nhiều LSA header càng tốt vào 1 DD packet (không vượt MTU)
-  4. Gửi DD packet đi
-  5. Chờ Slave ACK:
-     a) Slave ACK (echo seq num) → xóa LSA đã gửi khỏi Summary List
-        - Nếu Summary List còn → gửi DD tiếp (seq+1)
-        - Nếu Summary List rỗng + Slave M=0 → ExchangeDone
-     b) Slave không ACK sau RxmtInterval → retransmit gói cũ
+BƯỚC 1 — Master gửi DD chứa LSA headers (Section 10.8)
+───────────────────────────────────────────────────────
+  Class cần dùng: databaseDescriptionData (type 2) — gói DD chứa LSA headers
+                  NeighborData — ddSequenceNumber
+                  AreaData — routerLSAs (LSDB)
 
-Vai trò Slave (Section 10.8):
-  1. Nhận DD từ Master
-  2. Kiểm tra DD sequence number (Section 10.6):
-     - Nếu seq == neighbor seq → gói MỚI → xử lý
-     - Nếu seq == neighbor seq - 1 → DUPLICATE → gửi lại DD cũ
-     - Nếu seq khác → SeqNumberMismatch → quay về ExStart
-  3. Với gói mới:
-     a) So sánh từng LSA header trong DD với LSDB của mình (Section 13.1):
-        - Mình KHÔNG có LSA này → thêm vào Link State Request List
-        - Neighbor có LSA MỚI HƠN → thêm vào Link State Request List
-        - Mình có LSA mới hơn hoặc bằng → không cần xin
-     b) Cập nhật DD sequence number trong neighbor data = seq từ Master
-     c) Gửi DD packet phản hồi (ACK): cùng seq num, kèm LSA header của mình
-     d) Nếu Master M=0 và gói mình sắp gửi cũng M=0 → ExchangeDone
+  Master khởi tạo Exchange:
+    │
+    ├── 1. Copy nbr->ddSequenceNumber vào DD packet
+    │
+    ├── 2. Lấy LSA headers từ LSDB (area.routerLSAs)
+    │       ├── Mỗi LSA → lấy LSAHeader (20 byte)
+    │       ├── Bỏ qua LSA có LS age = MaxAge (cho vào retransmission list)
+    │       └── Số lượng còn lại → nLSA
+    │
+    ├── 3. Nhồi LSA headers vào DD packet
+    │       ├── Mỗi LSAHeader = 20 byte
+    │       ├── Tổng payload = 8 + nLSA * 20 byte
+    │       └── Không vượt MTU (1500 byte) → nếu vượt, gửi làm nhiều gói
+    │
+    ├── 4. Set flags: I=0 (không phải gói đầu), MS=1 (Master), M=1 nếu còn
+    │       └── M=0 nếu đây là gói cuối cùng (hết LSA trong LSDB)
+    │
+    ├── 5. Gửi DD packet
+    │       └── OspfMess::send(2, body, routerId, ...)
+    │
+    └── 6. Lên lịch rxmtTimer = RxmtInterval
+            └── Chờ Slave ACK, nếu không → retransmit (BƯỚC 4)
+
+BƯỚC 2 — Slave nhận DD từ Master, so sánh LSDB, gửi ACK (Section 10.6, 10.8)
+─────────────────────────────────────────────────────────────────────────────
+  Class cần dùng: databaseDescriptionData (type 2)
+                  NeighborData — ddSequenceNumber, lastDdOptions, lastDdIMs
+                  AreaData — routerLSAs (LSDB)
+                  linkStateRequestData (type 3) — danh sách LSA cần xin
+
+  Slave nhận DD từ Master (type=2):
+    │
+    ├── 1. Parse DD body (giống BƯỚC 2 GIAI ĐOẠN 1)
+    │       ├── interfaceMTU, options, flags (I/M/MS), ddSequenceNumber
+    │       └── LSA headers (phần còn lại, mỗi cái 20 byte)
+    │
+    ├── 2. Kiểm tra DD sequence number — Slave nhận từ Master (Section 10.6)
+    │       ├── pktSeq == nbr->ddSequenceNumber + 1 → gói MỚI → xử lý
+    │       │     (Master tăng seq rồi mới gửi, nên Slave nhận được seq = seq cũ + 1)
+    │       ├── pktSeq == nbr->ddSequenceNumber → DUPLICATE → gửi lại DD cũ
+    │       └── pktSeq khác → SeqNumberMismatch → quay về ExStart
+    │
+    ├── 3. Với gói mới: so sánh từng LSA header với LSDB của mình (Section 13.1)
+    │       ├── Mình KHÔNG có LSA này → thêm vào linkStateRequestData::requests
+    │       ├── Neighbor có LSA MỚI HƠN → thêm vào linkStateRequestData::requests
+    │       └── Mình có LSA mới hơn hoặc bằng → không cần xin
+    │
+    ├── 4. Cập nhật neighbor data
+    │       ├── nbr->ddSequenceNumber = pktSeq
+    │       ├── nbr->lastDdOptions = pktOptions
+    │       └── nbr->lastDdIMs = pktFlags
+    │
+    ├── 5. Gửi DD ACK (echo seq num của Master)
+    │       ├── DD body: MTU + Options + Flags(MS=0, I=0) + seq + LSA headers của mình
+    │       ├── Lấy LSA headers từ LSDB của mình (area.routerLSAs)
+    │       └── M=1 nếu còn LSA chưa gửi, M=0 nếu hết
+    │
+    └── 6. Kiểm tra ExchangeDone
+            └── Master M=0 VÀ gói mình gửi M=0 → ExchangeDone
+                ├── linkStateRequestData::requests rỗng → NBR_FULL
+                └── linkStateRequestData::requests không rỗng → NBR_LOADING
+
+BƯỚC 3 — Master nhận ACK từ Slave, gửi tiếp hoặc ExchangeDone (Section 10.8)
+─────────────────────────────────────────────────────────────────────────────
+
+  Master nhận DD ACK từ Slave (type=2, MS=0):
+    │
+    ├── 1. Parse DD body, kiểm tra I=0, MS=0
+    │
+    ├── 2. Kiểm tra pktSeq == nbr->ddSequenceNumber (Slave echo đúng)
+    │       ├── Đúng → ACK hợp lệ
+    │       └── Sai → bỏ qua, chờ retransmit
+    │
+    ├── 3. Xóa các LSA header đã gửi khỏi danh sách chờ
+    │       └── Những LSA trong gói DD trước đã được Slave nhận → không cần gửi lại
+    │
+    ├── 4. Kiểm tra còn LSA nào chưa gửi không?
+    │       ├── CÒN → gửi DD tiếp: tăng seq+1, set M=1, quay lại BƯỚC 1
+    │       └── HẾT → kiểm tra M bit từ Slave:
+    │           ├── Slave M=1 → Slave còn LSA chưa gửi → chờ Slave gửi tiếp
+    │           └── Slave M=0 → ExchangeDone
+    │               ├── linkStateRequestData::requests rỗng → NBR_FULL
+    │               └── linkStateRequestData::requests không rỗng → NBR_LOADING
+    │
+    └── 5. So sánh LSA headers từ Slave với LSDB của mình (giống BƯỚC 2.3)
+            └── Thêm LSA thiếu/cũ hơn vào linkStateRequestData::requests
+
+BƯỚC 4 — Retransmit DD khi chưa có phản hồi (Section 10.8)
+───────────────────────────────────────────────────────────
+
+  rxmtTimer cháy khi đang ở Exchange:
+    │
+    └── Gửi lại DD packet y hệt lần trước (cùng seq, cùng LSA headers)
+        └── Schedule lại rxmtTimer = RxmtInterval
 
 Kết thúc Exchange:
   - Cả 2 bên đều đã gửi và nhận DD packet với M=0
-  - Slave thường phát hiện ExchangeDone TRƯỚC Master
-  - ExchangeDone → nếu Request List rỗng → Full
-                   → nếu Request List không rỗng → Loading
+  - ExchangeDone → linkStateRequestData::requests rỗng → NBR_FULL
+                → linkStateRequestData::requests không rỗng → NBR_LOADING
 
-So sánh LSA mới hơn (Section 13.1):
+So sánh LSA mới hơn (Section 13.1) — dùng trong BƯỚC 2.3 và BƯỚC 3.5:
   Một LSA instance được coi là "mới hơn" nếu:
   1. LS sequence number lớn hơn (so sánh signed int32, không gian vòng)
   2. Cùng seq num → LS checksum lớn hơn
@@ -307,40 +381,131 @@ So sánh LSA mới hơn (Section 13.1):
 
 ────────────────────────────────────────────────────────────
 GIAI ĐOẠN 3: Loading — Xin LSA còn thiếu
-(Section 10.3, 10.7, 10.9)
+(Section 10.3, 10.7, 10.9, 13)
 ────────────────────────────────────────────────────────────
 
 Mục đích: Gửi Link State Request để lấy NỘI DUNG ĐẦY ĐỦ của những LSA
 mà mình phát hiện là thiếu hoặc cũ hơn trong giai đoạn Exchange.
 
-Gửi Link State Request (Section 10.9):
-  1. Lấy các mục từ ĐẦU Link State Request List
-  2. Mỗi mục: (LS type, Link State ID, Advertising Router)
-  3. Đóng gói vào Link State Request packet (type 3)
-  4. Gửi đi
-  5. Chỉ 1 Request packet outstanding tại 1 thời điểm
-  6. Retransmit sau RxmtInterval nếu chưa nhận Update
+Giai đoạn này gồm 2 flow độc lập, mỗi flow xử lý 1 chiều giao tiếp:
 
-Nhận Link State Update trả lời (Section 10.7):
-  1. Với mỗi LSA trong Update:
-     - Tìm LSA trong LSDB của mình
-     - Cài đặt LSA mới vào LSDB (Section 13.2)
-     - Gửi Link State Acknowledgment (type 5) nếu cần
-  2. Xóa LSA đã nhận khỏi Request List
-  3. Nếu Request List còn → gửi Request tiếp
-  4. Request List rỗng + đang ở Loading → LoadingDone → Full
+  FLOW A: Mình xin LSA từ neighbor
+  ────────────────────────────────
+  Mình gửi LSR (type 3) → neighbor tìm trong LSDB → gửi LSU (type 4) →
+  mình nhận LSU → cài vào LSDB. Lặp đến khi request list rỗng.
 
-Xử lý Link State Request từ neighbor (Section 10.7):
-  - Chỉ chấp nhận khi neighbor ở Exchange, Loading, hoặc Full
-  - Với mỗi LSA được yêu cầu:
-    - Tìm trong LSDB của mình
-    - Copy vào Link State Update (type 4) để gửi trả lời
-    - KHÔNG thêm vào retransmission list (chỉ flooding mới thêm)
-  - Nếu không tìm thấy LSA → BadLSReq → quay về ExStart
+  FLOW B: Neighbor xin LSA từ mình
+  ──────────────────────────────────
+  Neighbor gửi LSR (type 3) → mình nhận → tìm trong LSDB →
+  gửi LSU (type 4) trả lời.
 
-Kết thúc:
-  - Request List rỗng + Exchange đã hoàn thành → LoadingDone → Full
-  - Full = adjacency hoàn chỉnh, sẽ được quảng bá trong Router-LSA
+
+────────────────────────────────────────────────
+FLOW A — Mình xin LSA từ neighbor
+────────────────────────────────────────────────
+
+  Flow này xảy ra khi mình là bên thiếu LSA: mình gửi LSR → neighbor gửi LSU → mình cài vào LSDB.
+  Lặp đến khi linkStateRequestList rỗng → LoadingDone → Full.
+
+  Cấu trúc dữ liệu liên quan:
+    NeighborData::linkStateRequestList — danh sách LSA mình cần xin từ neighbor này
+      Mỗi mục: (LS type, Link State ID, Advertising Router)
+    AreaData::routerLSAs — LSDB của mình, nơi cài LSA nhận được
+    NeighborData::rxmtTimer — timer retransmit LSR
+
+BƯỚC A1 — Gửi Link State Request (Section 10.9)
+────────────────────────────────────────────────
+  Class cần dùng: linkStateRequestData (type 3)
+
+  Mình gửi LS Request cho neighbor:
+    │
+    ├── 1. Lấy các mục từ nbr->linkStateRequestList
+    │       ├── Mỗi mục 12 byte: (LS type, Link State ID, Advertising Router)
+    │       └── Chỉ lấy 1 phần vừa đủ (không vượt MTU)
+    │
+    ├── 2. Đóng gói vào LSR body → mỗi request = 3 × uint32_t
+    │
+    ├── 3. Gửi packet type 3
+    │       └── OspfMess::send(3, body, routerId, areaID, ifIndex, mod)
+    │
+    ├── 4. Chỉ 1 Request packet outstanding tại 1 thời điểm
+    │       └── Không gửi LSR mới khi đang chờ LSU từ LSR trước
+    │
+    └── 5. Lên lịch rxmtTimer = iface->rxmtInterval
+            └── Hết timer mà chưa nhận LSU → retransmit LSR cũ
+
+BƯỚC A2 — Nhận Link State Update, cài vào LSDB (Section 13, 13.2)
+─────────────────────────────────────────────────────────────────
+  Class cần dùng: linkStateUpdateData (type 4)
+                  linkStateAcknowledgementData (type 5)
+
+  Mình nhận LSU từ neighbor (type=4) — đây là phản hồi cho LSR mình đã gửi:
+    │
+    ├── 1. Parse LSU body
+    │       ├── numberOfLSA (32 bit)
+    │       └── Danh sách LSA đầy đủ (header 20B + body)
+    │
+    ├── 2. Với mỗi LSA trong Update:
+    │       ├── Tìm LSA tương ứng trong area.routerLSAs
+    │       │     └── Khóa: (LS type, Link State ID, Advertising Router)
+    │       ├── Quyết định cài đặt (Section 13.2):
+    │       │     ├── LSDB chưa có LSA này → thêm mới
+    │       │     ├── LSDB có + LSA mới có seq mới hơn → thay thế
+    │       │     │     ├── Cũ hơn/lỗi checksum → bỏ qua, không ack
+    │       │     │     └── Trùng seq → xem checksum, age để quyết định
+    │       │     └── LSDB có + LSA mới là bản sao → bỏ qua
+    │       ├── Gửi Link State Acknowledgment (type 5) nếu LSA được cài đặt
+    │       │     └── LSAck: gửi lại LSA header (20B) để xác nhận đã nhận
+    │       └── Nếu LSA mới được cài → đánh dấu cần flood ra interface khác
+    │
+    ├── 3. Xóa LSA đã nhận khỏi nbr->linkStateRequestList
+    │       └── Chỉ xóa những mục khớp với LSA trong Update
+    │
+    ├── 4. Hủy rxmtTimer (đã có phản hồi từ neighbor)
+    │
+    └── 5. Kiểm tra linkStateRequestList
+            ├── CÒN mục chưa xin → gửi LSR tiếp (quay lại BƯỚC A1)
+            └── RỖNG → LoadingDone → chuyển state sang NBR_FULL
+
+
+────────────────────────────────────────────────
+FLOW B — Neighbor xin LSA từ mình
+────────────────────────────────────────────────
+
+  Class cần dùng: linkStateRequestData (type 3) — parse request
+                  linkStateUpdateData (type 4) — gửi LSA trả lời
+
+  Router nhận LS Request từ neighbor (type=3):
+    │
+    ├── 1. Chỉ chấp nhận khi neighbor ở Exchange, Loading, hoặc Full
+    │       └── Trạng thái khác → bỏ qua
+    │
+    ├── 2. Parse LSR body: mỗi request 12 byte
+    │       ├── LS type (32 bit)
+    │       ├── Link State ID (32 bit)
+    │       └── Advertising Router (32 bit)
+    │
+    ├── 3. Với mỗi LSA được yêu cầu:
+    │       ├── Tìm LSA trong LSDB của mình
+    │       ├── TÌM THẤY → copy vào linkStateUpdateData::LSAs
+    │       │     └── KHÔNG thêm vào retransmission list (chỉ flooding mới thêm)
+    │       └── KHÔNG TÌM THẤY → BadLSReq → quay về ExStart
+    │
+    └── 4. Gửi Link State Update (type 4) chứa các LSA đã tìm thấy
+            └── OspfMess::send(4, body, routerId, areaID, ifIndex, mod)
+
+Kết thúc Loading:
+  - Request List rỗng → LoadingDone → NBR_FULL
+  - Full = adjacency hoàn chỉnh
+
+  rxmtTimer cháy khi đang ở Loading:
+    │
+    └── Gửi lại LS Request y hệt lần trước (cùng danh sách request)
+        └── Schedule lại rxmtTimer = RxmtInterval
+
+Kết thúc Loading:
+  - Request List rỗng → LoadingDone → NBR_FULL
+  - Full = adjacency hoàn chỉnh
 
 
 CẤU TRÚC GÓI TIN
@@ -445,12 +610,6 @@ Hiện tại NeighborData đã có các trường liên quan:
   - lastDdIMs         (I+M+MS bits từ DD cuối cùng)
 
 Cần bổ sung:
-  - databaseSummaryList      vector<LsaHeader> — danh sách LSA cần gửi trong DD
-  - linkStateRequestList     vector<LsaHeader> — danh sách LSA cần xin
-  - linkStateRetransList     vector<LsaHeader> — danh sách LSA đang chờ ACK
-                             (dùng cho flooding, sẽ cần sau)
-
-Cần bổ sung timer:
   - rxmtTimer                cMessage* — timer retransmit DD/LS Request
                              (interval = InterfaceData::rxmtInterval)
 

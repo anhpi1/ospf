@@ -1,5 +1,5 @@
 //
-// Generated file, do not edit! Created by opp_msgtool 6.4 from /home/k/omnetpp-6.4.0/workspace/ospf/ospf.msg.
+// Generated file, do not edit! Created by opp_msgtool 6.4 from ospf.msg.
 //
 
 #ifndef __OSPF_M_H
@@ -18,7 +18,7 @@
 
 class Mess;
 /**
- * Class generated from <tt>/home/k/omnetpp-6.4.0/workspace/ospf/ospf.msg:6</tt> by opp_msgtool.
+ * Class generated from <tt>ospf.msg:6</tt> by opp_msgtool.
  * <pre>
  * message Mess
  * {

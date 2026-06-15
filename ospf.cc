@@ -27,11 +27,38 @@ void routerOspf::initialize()
 void routerOspf::handleMessage(cMessage *msg)
 {
     if (msg->isSelfMessage()) {
-        // báo thức reo → gửi Hello trên tất cả interface
-        for (int i = 0; i < (int)state->interfaces.size(); i++) {
-            helloData::sendHello(i, *state, routerId, this);
+        if (msg == helloTimer) {
+            // Gửi Hello trên tất cả interface
+            for (int i = 0; i < (int)state->interfaces.size(); i++) {
+                helloData::sendHello(i, *state, routerId, this);
+            }
+            scheduleAt(simTime() + state->interfaces[0].helloInterval, msg);
+        } else {
+            // rxmtTimer cháy
+            int ifIndex = msg->getKind();
+            InterfaceData* iface = &state->interfaces[ifIndex];
+            NeighborData* nbr = iface->neighbor;
+            if (nbr && nbr->state == NBR_EXSTART) {
+                // BƯỚC 3: retransmit DD rỗng
+                nbr->rxmtTimer = nullptr;
+                databaseDescriptionData::sendExStart(iface, ifIndex, routerId, this);
+            } else if (nbr && nbr->state >= NBR_EXCHANGE) {
+                // BƯỚC 4: retransmit DD trong Exchange
+                nbr->rxmtTimer = nullptr;
+                if (nbr->isMaster)
+                    databaseDescriptionData::sendExchange(iface, ifIndex, routerId, *state, this);
+                // Slave: gửi lại ACK (rebuild từ LSDB)
+                // → không cần làm gì thêm, Master sẽ retransmit
+            } else if (nbr && nbr->state == NBR_LOADING) {
+                // BƯỚC 5: retransmit LS Request trong Loading (RFC 10.9)
+                nbr->rxmtTimer = nullptr;
+                linkStateRequestData::sendLSR(iface, ifIndex, routerId,
+                                              nbr->linkStateRetransmissionList, this);
+            } else if (nbr) {
+                nbr->rxmtTimer = nullptr;
+            }
+            delete msg;
         }
-        scheduleAt(simTime() + state->interfaces[0].helloInterval, msg);
     } else {
         // Area ID là định danh 32-bit của area (RFC 2328 Section 3.6).
         // Header OSPF có field areaId — phải khớp areaID của interface nhận
@@ -52,10 +79,27 @@ void routerOspf::handleMessage(cMessage *msg)
 
         // Dispatch theo type
         if (pktType == 1) {
-            helloData::processHello(hdr, data, iface, routerId);
-            
+            helloData::processHello(hdr, data, iface, ifIndex, routerId, this);
+        } else if (pktType == 2) {
+            NeighborData* nbr = iface->neighbor;
+            if (nbr->state == NBR_EXSTART) {
+                databaseDescriptionData::processExStart(hdr, data, iface, ifIndex, routerId, *state, this);
+            } else if (nbr->state >= NBR_EXCHANGE) {
+                if (nbr->isMaster)
+                    databaseDescriptionData::processExchangeForMaster(hdr, data, iface, ifIndex, routerId, *state, this);
+                else
+                    databaseDescriptionData::processExchangeForSlave(hdr, data, iface, ifIndex, routerId, *state, this);
+            }
+        } else if (pktType == 3) {
+            // FLOW B: neighbor xin LSA từ mình
+            linkStateRequestData::processLSR(hdr, data, iface, ifIndex, routerId, *state, this);
+        } else if (pktType == 4) {
+            // FLOW A: nhận LSU → cài LSDB
+            linkStateUpdateData::processLSU(hdr, data, iface, ifIndex, routerId, *state, this);
+        } else if (pktType == 5) {
+            // Nhận LSAck → xóa khỏi retransmission list
+            linkStateAcknowledgementData::processAck(hdr, data, iface, ifIndex, *state, this);
         }
-        // TODO: type 2=DD, 3=LSR, 4=LSU, 5=LSAck
         delete msg;
     }
 }
@@ -63,6 +107,16 @@ void routerOspf::handleMessage(cMessage *msg)
 void routerOspf::finish()
 {
     cancelAndDelete(helloTimer);
+    // Dọn timer của từng neighbor
+    for (auto& iface : state->interfaces) {
+        NeighborData* nbr = iface.neighbor;
+        if (nbr) {
+            if (nbr->inactivityTimer)
+                cancelAndDelete(nbr->inactivityTimer);
+            if (nbr->rxmtTimer)
+                cancelAndDelete(nbr->rxmtTimer);
+        }
+    }
     state->printState();
     delete state;
 }

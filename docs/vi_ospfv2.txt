@@ -4030,8 +4030,6 @@ RFC 2328                     OSPF Version 2                   April 1998
 
 
 
-
-
 Moy                         Standards Track                    [Page 82]
 
 RFC 2328                     OSPF Version 2                   April 1998
