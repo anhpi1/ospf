@@ -1,0 +1,382 @@
+================================================================================
+                         OSPFv2 — SƠ ĐỒ LUỒNG V2
+                         Phân chia theo 2 Phase chính
+================================================================================
+
+Toàn bộ hoạt động của OSPF chia làm 2 Phase lớn:
+
+
+PHASE 0: KHỞI TẠO (Init)
+==========================
+│     Section 9.3 (InterfaceUp), 12.4 (originate)
+│     - InterfaceUp → Down → PointToPoint (Section 9.3)
+│       Khởi động Hello Timer, bắt đầu gửi Hello định kỳ
+│     - Interface state change → sinh event (2) (Section 12.4)
+│       → originate Router-LSA lần đầu (chỉ stub links)
+│     - Router-LSA này được lưu local trong LSDB,
+│       chưa thể flood vì chưa có neighbor nào ≥ Exchange.
+│       Nó sẽ được trao đổi qua DD/LSR/LSU trong Database Sync (1b).
+
+
+PHASE 1: XÂY DỰNG ĐỒ THỊ (Link-State Database)
+=================================================
+Mục tiêu: Mỗi router trong area có cùng một bản copy LSDB,
+phản ánh chính xác topology mạng.
+
+├── 1a: HELLO (Khám phá hàng xóm)
+│     Section 9.5, 10.5
+│     - Gửi Hello định kỳ mỗi HelloInterval
+│     - Nhận Hello → kiểm tra tham số
+│     - Phát hiện bidirectional (2-Way)
+│     - Duy trì quan hệ neighbor qua inactivityTimer
+│
+├── 1b: DATABASE SYNCHRONIZATION (Trao đổi LSDB)
+│     Section 10.3 – 10.9
+│     │
+│     ├── 1b1: ExStart + Exchange (Trao đổi danh sách LSA header)
+│     │     - Thương lượng Master/Slave
+│     │     - Master gửi DD chứa danh sách LSA header
+│     │     - Slave so sánh với LSDB, trả lời ACK
+│     │     - Kết thúc: ExchangeDone
+│     │
+│     └── 1b2: Loading (Kéo dữ liệu LSA về)
+│           - Nếu không thiếu LSA → Full ngay
+│           - Nếu thiếu → gửi LSR → nhận LSU → cài LSDB → Full
+│
+└── 1c: ORIGINATE + FLOOD (Lan truyền LSA)
+      Section 12.4.1, 13.3, 13.5
+      - Khi có neighbor Full → originate lại Router-LSA (thêm P2P links)
+      - LSA mới được flood ra neighbor ≥ Exchange qua LSU
+      - Neighbor nhận LSU → cài LSDB → gửi LSAck → flood tiếp
+      - LSAck (type 5) xác nhận đã nhận, tránh retransmit (Section 13.5)
+      - Kết quả: Mọi router trong area có LSDB giống hệt nhau
+
+      ⚠ LSA đầu tiên (sau InterfaceUp, chỉ có stub links) KHÔNG thể flood
+        vì chưa có neighbor nào ≥ Exchange. Nó chỉ được trao đổi qua
+        DD/LSR/LSU trong Database Sync (1b). Flood thực sự bắt đầu
+        ở Bước 5 sau khi đã có LSA với P2P links.
+
+
+VÍ DỤ: Phase 1 trên mạng 4 router
+===================================
+Topology:
+         R1 ─── R2            Mỗi dòng là 1 P2P link
+          \    /              R1─R2, R1─R4
+           R4                 R2─R4, R4─R6
+           │
+           R6
+
+
+Bước 0: Khởi động — LSDB cả 4 đều rỗng
+
+Bước 1: InterfaceUp → PointToPoint
+  Mỗi router originate Router-LSA lần đầu (event 2 — interface state changes):
+    R1: LSA{ stub(0x1) }
+    R2: LSA{ stub(0x2) }
+    R4: LSA{ stub(0x4) }
+    R6: LSA{ stub(0x6) }
+
+  ⚠ LSA này chỉ có stub links, CHƯA THỂ flood vì chưa có neighbor ≥ Exchange.
+    Nó nằm local, chờ tới Database Sync (Bước 3) mới được trao đổi qua DD/LSU.
+
+Bước 2: Hello → 2Way
+  Tất cả cặp láng giềng bidirectional:
+    R1─R2, R1─R4, R2─R4, R4─R6
+
+Bước 3: Database Sync (từng cặp, song song)
+  3a. ExStart + Exchange: các DD chứa LSA header từ LSDB mỗi bên
+  3b. Loading: kéo LSA còn thiếu về
+
+  Sau 3b, LSDB từng router:
+    R1: {R1, R2, R4}        ← chưa có R6
+    R2: {R1, R2, R4}        ← chưa có R6
+    R4: {R1, R2, R4, R6}    ← đủ
+    R6: {R4, R6}             ← chỉ biết R4
+
+  Mỗi router mới chỉ có LSA của những router nó trực tiếp đồng bộ.
+  Tất cả LSA chỉ có stub links, chưa có P2P link nào.
+
+Bước 4: Event (4) — Neighbor Full → originate lại Router-LSA
+
+  R1 có neighbor Full: R2, R4
+    → LSA{ stub(0x1), P2P→R2, P2P→R4 }
+
+  R2 có neighbor Full: R1, R4
+    → LSA{ stub(0x2), P2P→R1, P2P→R4 }
+
+  R4 có neighbor Full: R1, R2, R6
+    → LSA{ stub(0x4), P2P→R1, P2P→R2, P2P→R6 }
+
+  R6 có neighbor Full: R4
+    → LSA{ stub(0x6), P2P→R4 }
+
+Bước 5: Flood — LSA mới lan toàn area
+  - R1 → flood ra R2, R4 (≥ Exchange)
+  - R2, R4 cài vào LSDB → schedule SPF → flood tiếp
+  - Router-LSA của R4 có P2P→R6 → flood đến R6
+  - R6 lần đầu biết đến R1, R2
+
+  Sau flood, LSDB của MỌI router đã giống hệt nhau:
+    R1: LSA{ stub(0x1), P2P→R2, P2P→R4 }
+    R2: LSA{ stub(0x2), P2P→R1, P2P→R4 }
+    R4: LSA{ stub(0x4), P2P→R1, P2P→R2, P2P→R6 }
+    R6: LSA{ stub(0x6), P2P→R4 }
+
+  Đồ thị hoàn chỉnh: 4 đỉnh, cạnh khớp 2 chiều.
+  Phase 1 kết thúc ✅ → sẵn sàng Phase 2 (SPF).
+
+
+KẾT QUẢ ĐẦU RA MONG MUỐN
+TRẠNG THÁI TỪNG SUB-PHASE
+===========================
+
+1a — HELLO
+──────────
+  Interface state:  PointToPoint (từ Phase 0)
+  Neighbor state:   Down → Init → 2Way
+  neighbor.ID:      chưa biết → biết (từ Hello header)
+  LSDB:             có Router-LSA của chính mình (stub links)
+
+1b — DATABASE SYNCHRONIZATION
+──────────────────────────────
+  1b1 — ExStart + Exchange
+  ─────────────────────────
+    Interface state:  PointToPoint (không đổi)
+    Neighbor state:   2Way → ExStart → Exchange
+    neighbor.isMaster:  true/false  (sau NegotiationDone)
+    neighbor.ddSeq:     khởi tạo (lần đầu = clock)
+    neighbor.databaseSummaryList:  toàn bộ LSA header từ LSDB
+    neighbor.linkStateRequestList: LSA header cần kéo về
+    neighbor.linkStateRetransmissionList:  LSA đã gửi chờ ACK
+    LSDB:               chưa thay đổi
+    Ghi chú:            3 list (databaseSummary, request, retransmission)
+                        bị clear khi có lỗi (SeqNumberMismatch, BadLSReq,
+                        KillNbr, LLDown, InactivityTimer, 1-Way) — Section 10.3
+
+  1b2 — Loading
+  ─────────────
+    Neighbor state:   Exchange → Loading → Full
+    neighbor.linkStateRequestList:  danh sách LSA cần kéo về
+    neighbor.linkStateRetransmissionList:  LSA đã gửi chờ ACK
+    LSDB:             thêm LSA mới (kéo về từ neighbor qua LSU)
+
+1c — ORIGINATE + FLOOD
+────────────────────────
+  Khi originate:
+    LSDB:             Router-LSA của mình được UPDATE
+                      (thêm P2P links cho neighbor Full)
+    Stub link on P2P: dùng Option 1 (RFC 12.4.1.1)
+                      Link ID = neighbor's Router ID
+                      Link Data = 0xffffffff (host route)
+                      Vì dự án dùng IP = Router ID, không có subnet riêng.
+  Khi flood (Section 13.3, 13.5):
+    - Gửi LSU chứa LSA mới ra neighbor ≥ Exchange
+    - Neighbor nhận LSU → validate → cài LSDB → gửi LSAck (Section 13.5)
+    - Nếu không nhận LSAck trong RxmtInterval → retransmit LSU (Section 13.6)
+    - Flood tiếp ra các neighbor ≥ Exchange khác
+    LSDB của mọi router:  dần dần giống nhau
+    Sau flood xong:       LSDB đồng bộ toàn area ✅
+
+2a — SPF
+─────────
+  LSDB:               đã đồng bộ (toàn area)
+  spfVertices:        được xây dựng (cây SPF) — mỗi đỉnh có:
+                        vertexId, parent, nextHop, distance
+  RoutingTable:       chưa có (sẽ xây ở 2b)
+
+2b — ROUTING TABLE
+───────────────────
+  RoutingTable:       được xây từ cây SPF — mỗi entry có:
+                        destinationId (Router ID)
+                        nextHop (Router ID của hop đầu tiên)
+                        cost (tổng chi phí từ gốc)
+                        interface (index ra cổng tương ứng)
+
+
+PHASE 2: XÂY DỰNG BẢNG ĐỊNH TUYẾN
+====================================
+Mục tiêu: Từ LSDB đã đồng bộ, tính đường đi ngắn nhất
+và xây bảng định tuyến.
+
+├── 2a: SPF (Dijkstra)
+│     Section 16
+│     - Đỉnh: các router (Router-LSA)
+│     - Cạnh: link P2P (có neighbor Full) + stub (leaf)
+│     - Gốc: self router
+│     - Tính shortest path tree
+│
+└── 2b: ROUTING TABLE
+      Section 11
+      - Duyệt cây SPF → route đến từng đích
+      - Next-hop, interface, cost
+      - Sẵn sàng cho forwarding
+
+
+VÍ DỤ: Phase 2 trên mạng 4 router
+===================================
+Tiếp nối từ Phase 1 — LSDB đã đồng bộ toàn area:
+
+    R1: LSA{ stub(0x1), P2P→R2, P2P→R4 }
+    R2: LSA{ stub(0x2), P2P→R1, P2P→R4 }
+    R4: LSA{ stub(0x4), P2P→R1, P2P→R2, P2P→R6 }
+    R6: LSA{ stub(0x6), P2P→R4 }
+
+Đồ thị tương đương:
+         R1(1) ─── R2(2)      Số trong () = Router ID
+          \    /              Mỗi cạnh cost = 1
+           R4(4)
+            |
+           R6(6)
+
+
+Bước 6: SPF — Tính cây đường đi ngắn nhất từ mỗi gốc
+─────────────────────────────────────────────────────
+
+  6a — SPF từ R1 (root = R1):
+  ───────────────────────────
+    Bắt đầu: candidate = { R1(0) }
+
+    Lấy R1(0):
+      Xét LSA của R1: P2P→R2(cost1), P2P→R4(cost1)
+      → candidate += { R2(1), R4(1) }
+
+    Lấy R2(1) (nhỏ nhất):
+      Xét LSA của R2: P2P→R1(cost1) → R1 đã có
+                       P2P→R4(cost1) → R4(1+1=2) > R4(1) hiện tại → bỏ qua
+      → candidate = { R4(1) }
+
+    Lấy R4(1):
+      Xét LSA của R4: P2P→R1(cost1) → R1 đã có
+                       P2P→R2(cost1) → R2(1+1=2) > R2(1) → bỏ qua
+                       P2P→R6(cost1) → R6(1+1=2) → candidate += { R6(2) }
+
+    Lấy R6(2):
+      Xét LSA của R6: P2P→R4(cost1) → R4 đã có
+      → candidate rỗng → kết thúc
+
+    Cây SPF từ R1:
+            R1(0)
+           /    \
+        R2(1)  R4(1)
+                |
+               R6(2)
+
+  6b — SPF từ R2 (root = R2):
+  ───────────────────────────
+    Kết quả:
+            R2(0)
+           /    \
+        R1(1)  R4(1)
+                |
+               R6(2)
+
+  6c — SPF từ R4 (root = R4):
+  ───────────────────────────
+    Kết quả:
+            R4(0)
+          /   |   \
+       R1(1) R2(1) R6(1)
+
+  6d — SPF từ R6 (root = R6):
+  ───────────────────────────
+    Kết quả:
+            R6(0)
+              |
+            R4(1)
+           /    \
+        R1(2)  R2(2)
+
+
+Bước 7: Xây Routing Table từ cây SPF
+─────────────────────────────────────
+
+  Duyệt cây SPF: mỗi đỉnh khác gốc → 1 entry trong RoutingTable.
+  Next-hop = neighbor đầu tiên trên đường từ gốc đến đích.
+
+  Routing Table của R1:
+  ┌─────┬──────────┬──────┬───────────┬─────────────┐
+  │ Đích│ Next-hop │ Cost │ Interface │ Ghi chú     │
+  ├─────┼──────────┼──────┼───────────┼─────────────┤
+  │ R2  │ R2 (2)   │  1   │ [0]       │ P2P trực tiếp│
+  │ R4  │ R4 (4)   │  1   │ [1]       │ P2P trực tiếp│
+  │ R6  │ R4 (4)   │  2   │ [1]       │ qua R4       │
+  └─────┴──────────┴──────┴───────────┴─────────────┘
+
+  Routing Table của R2:
+  ┌─────┬──────────┬──────┬───────────┬─────────────┐
+  │ Đích│ Next-hop │ Cost │ Interface │ Ghi chú     │
+  ├─────┼──────────┼──────┼───────────┼─────────────┤
+  │ R1  │ R1 (1)   │  1   │ [0]       │ P2P trực tiếp│
+  │ R4  │ R4 (4)   │  1   │ [2]       │ P2P trực tiếp│
+  │ R6  │ R4 (4)   │  2   │ [2]       │ qua R4       │
+  └─────┴──────────┴──────┴───────────┴─────────────┘
+
+  Routing Table của R4:
+  ┌─────┬──────────┬──────┬───────────┬─────────────┐
+  │ Đích│ Next-hop │ Cost │ Interface │ Ghi chú     │
+  ├─────┼──────────┼──────┼───────────┼─────────────┤
+  │ R1  │ R1 (1)   │  1   │ [0]       │ P2P trực tiếp│
+  │ R2  │ R2 (2)   │  1   │ [1]       │ P2P trực tiếp│
+  │ R6  │ R6 (6)   │  1   │ [3]       │ P2P trực tiếp│
+  └─────┴──────────┴──────┴───────────┴─────────────┘
+
+  Routing Table của R6:
+  ┌─────┬──────────┬──────┬───────────┬─────────────┐
+  │ Đích│ Next-hop │ Cost │ Interface │ Ghi chú     │
+  ├─────┼──────────┼──────┼───────────┼─────────────┤
+  │ R4  │ R4 (4)   │  1   │ [0]       │ P2P trực tiếp│
+  │ R1  │ R4 (4)   │  2   │ [0]       │ qua R4       │
+  │ R2  │ R4 (4)   │  2   │ [0]       │ qua R4       │
+  └─────┴──────────┴──────┴───────────┴─────────────┘
+
+  ✅ Phase 2 hoàn tất. Mỗi router có bảng định tuyến đầy đủ
+     để chuyển gói tin đến bất kỳ router nào trong area.
+
+
+
+
+Phần 6: NEIGHBOR STATE MACHINE (Section 10.3)
+===============================================
+
+  Router A ───────────────────────────────────────── Router B
+
+  +----------------+
+  |     DOWN       | ← trạng thái khởi đầu, chưa biết neighbor
+  +-------+--------+
+          | nhận Hello từ neighbor
+          v
+  +----------------+
+  |     INIT       | ← đã thấy neighbor nhưng chưa bidirectional
+  +-------+--------+
+          | thấy chính mình (self) trong Neighbor list của Hello B gửi đến
+          v
+  +----------------+
+  |    TWO-WAY     | ← bidirectional! Trên P2P → ngay lập tức bắt đầu adjacency
+  +-------+--------+
+          | (trên broadcast: quyết định bởi DR/BDR)
+          v                           ExStart ── Không được! ──→ TWO-WAY
+  +----------------+
+  |   EXSTART      | ← master/slave negotiation (DD với I,M,MS bits)
+  +-------+--------+
+          | NegotiationDone
+          v
+  +----------------+
+  |   EXCHANGE     | ← trao đổi DD packets, liệt kê LSA headers
+  +-------+--------+
+          | ExchangeDone
+          v
+  +----------------+
+  |   LOADING      | ← gửi LSR yêu cầu LSA thiếu, nhận LSU, gửi LSAck
+  +-------+--------+
+          | LoadingDone (link state request list rỗng)
+          v
+  +----------------+
+  |     FULL       | ← adjacency hoàn tất, LSDB đồng bộ
+  +----------------+
+
+  Các sự kiện đặc biệt:
+    SeqNumberMismatch → ExStart (reset DD sequence)
+    BadLSReq          → ExStart    (LSA không tồn tại)
+    One-Way           → Init       (không còn bidirectional)
+    KillNbr           → Down       (neighbor chết, inactivity timer hết hạn)
+    LLDown            → Down       (interface low-level down)

@@ -1,0 +1,332 @@
+================================================================================
+1a — HELLO PROTOCOL (Khám phá hàng xóm)
+  Section 9.3 (Interface state machine), 9.5 (Sending Hello),
+  10.5 (Receiving Hello), 10.3 (Neighbor state machine)
+================================================================================
+
+Mục tiêu: Phát hiện neighbor, thiết lập bidirectional (2Way),
+         duy trì quan hệ neighbor qua inactivity timer.
+
+===============================================================================
+CẤU TRÚC TỔNG QUAN (dạng tree)
+===============================================================================
+
+1a: HELLO PROTOCOL
+│
+├── [Flow] KHỞI TẠO — chạy 1 lần khi InterfaceUp (Section 9.3)
+│   └── Điều kiện vào: interface ở Down, nhận sự kiện InterfaceUp
+│       │
+│       ├── 1. Chuyển interface state: Down → PointToPoint
+│       │
+│       ├── 2. Khởi động Hello Timer
+│       │     └── scheduleAt(now + helloInterval, helloTimer)
+│
+├── [Parallel] BA TIẾN TRÌNH SONG SONG — chạy đồng thời, độc lập
+│   │
+│   ├── 1a.A — [Loop] GỬI HELLO ĐỊNH KỲ
+│   │   ├── Điều kiện lặp: interface.state == PointToPoint
+│   │   ├── Điều kiện kết thúc: interface chuyển khỏi PointToPoint
+│   │   │   (InterfaceDown/LoopInd)
+│   │   └── Thân loop:
+│   │       │
+│   │       ├── LẶP:
+│   │       │   ├── Đợi: helloTimer cháy
+│   │       │   ├── Gửi Hello packet ra cổng
+│   │       │   │   └── Body: networkMask, helloInterval, options,
+│   │       │   │       routerPriority, deadInterval,
+│   │       │   │       designatedRouter, backupDesignatedRouter,
+│   │       │   │       neighborList (các neighbor ≥ Init)
+│   │       │   └── scheduleAt(now + helloInterval, helloTimer)
+│   │       │
+│   │       └── KẾT THÚC khi interface.state != PointToPoint
+│   │
+│   ├── 1a.B — [Flow] XỬ LÝ GÓI HELLO ĐẾN
+│   │   └── Mỗi khi nhận được gói tin type=1 (Hello)
+│   │       │
+│   │       ├── B1: Validate tham số (Section 10.5)
+│   │       │   ├── NetworkMask: bỏ qua trên P2P (RFC: exception)
+│   │       │   ├── HelloInterval: phải == iface.helloInterval
+│   │       │   ├── RouterDeadInterval: phải == iface.routerDeadInterval
+│   │       │   └── Options (E-bit): phải match area
+│   │       │       └── Nếu bất kỳ mismatch → DROP GÓI (kết thúc)
+│   │       │
+│   │       ├── B2: Cập nhật neighbor thông tin
+│   │       │   ├── neighbor.IDNeighbor = hdr.routerId
+│   │       │   └── neighbor.IPNeighbor = IP source
+│   │       │
+│   │       ├── B3: [Flow] NEIGHBOR STATE MACHINE (Section 10.3)
+│   │       │   │
+│   │       │   └── [Tree] Phân nhánh theo trạng thái hiện tại
+│   │       │       │
+│   │       │       ├── Nếu neighbor.state == Down
+│   │       │       │   └── neighbor.state = Init
+│   │       │       │       └── [Action] Start InactivityTimer
+│   │       │       │
+│   │       │       ├── Nếu neighbor.state >= Init
+│   │       │       │   └── Không đổi state
+│   │       │       │       └── [Action] Reset InactivityTimer
+│   │       │       │
+│   │       │       └── ── (Luôn luôn chạy) Kiểm tra 2WayReceived ──
+│   │       │           │
+│   │       │           └── [Tree] Kiểm tra: thấy self.RouterID trong
+│   │       │               neighbor list của Hello packet?
+│   │       │               │
+│   │       │               ├── CÓ (2WayReceived) — bidirectional!
+│   │       │               │   │
+│   │       │               │   └── [Tree] Theo trạng thái hiện tại:
+│   │       │               │       │
+│   │       │               │       ├── Nếu state == Init
+│   │       │               │       │   └── [Tree] P2P? (Section 10.4)
+│   │       │               │       │       ├── YES → state = ExStart (P2P luôn form adjacency)
+│   │       │               │       │       │   └── [TODO] chuyển 1b1
+│   │       │               │       │       └── NO (broadcast) → state = 2Way
+│   │       │               │       │
+│   │       │               │       ├── Nếu state == 2Way/ExStart/Exchange
+│   │       │               │       │   └── Không đổi state (đã bidirectional rồi)
+│   │       │               │       │
+│   │       │               │       └── Nếu state == Loading/Full
+│   │       │               │           └── Không đổi state
+│   │       │               │
+│   │       │               └── KHÔNG (1-WayReceived) — mất bidirectional
+│   │       │                   │
+│   │       │                   └── [Tree] Theo trạng thái:
+│   │       │                       │
+│   │       │                       ├── Nếu state >= 2Way
+│   │       │                       │   └── state = Init
+│   │       │                       │       └── [Action] Xóa 3 list (nếu có)
+│   │       │                       │           (databaseSummary, request,
+│   │       │                       │            retransmission)
+│   │       │                       │
+│   │       │                       └── Nếu state < 2Way
+│   │       │                           └── Không đổi state
+│   │       │
+│   │       └── B4: [Done] Kết thúc xử lý
+│   │
+│   └── 1a.C — [Flow] XỬ LÝ INACTIVITY TIMER
+│       └── Điều kiện: InactivityTimer cháy (không nhận Hello từ neighbor
+│                       trong RouterDeadInterval giây)
+│           │
+│           ├── [Action] neighbor.state = Down
+│           ├── [Action] neighbor.IDNeighbor = 0
+│           └── [Action] Xóa 3 list (databaseSummary, request, retransmission)
+│
+└── ── (Tương tác giữa các tiến trình) ──
+    │
+    ├── 1a.A (gửi Hello) và 1a.B (nhận Hello) giao tiếp qua
+    │   neighbor list trong Hello body: neighbor.A gửi danh sách các
+    │   neighbor mà neighbor.A đã thấy → neighbor.B kiểm tra self có
+    │   trong list đó không để xác định bidirectional.
+    │
+    └── 1a.C (InactivityTimer) là hậu quả của việc 1a.B không được
+        kích hoạt trong RouterDeadInterval giây.
+        Mỗi lần 1a.B xử lý Hello, nó reset InactivityTimer.
+        Nếu timer cháy → neighbor bị coi là chết.
+
+
+===============================================================================
+CHI TIẾT: CẤU TRÚC DỮ LIỆU LIÊN QUAN
+===============================================================================
+
+NeighborData (mỗi interface có 1, cấp phát tĩnh)
+  Ghi chú: Trên broadcast/NBMA, neighbor được tạo động khi nhận Hello
+  đầu tiên (Section 10.5). Dự án P2P: cấp phát tĩnh 1 neighbor/interface.
+├── state:        OspfNeighborState (Down=0, Init=2, 2Way=3)
+├── IDNeighbor:   uint32_t (Router ID của neighbor, 0 nếu chưa biết)
+├── inactivityTimer: cMessage* (timer cho neighbor này)
+└── [sau này] các list cho 1b, 1c
+
+InterfaceData
+├── state:        OspfInterfaceState (Down=0, PointToPoint=3)
+├── helloInterval: int (mặc định 10s)
+├── routerDeadInterval: int (mặc định 40s)
+├── helloTimer:   cMessage* (chung cho cả interface)
+├── neighbor:     NeighborData* (1 con trỏ, P2P chỉ có 1 neighbor)
+└── [sau này] linkData cho 1c
+
+
+===============================================================================
+CẤU TRÚC XỬ LÝ TRONG handleMessage (theo Rule 8)
+===============================================================================
+
+handleMessage(msg)
+│
+├── [Tree] msg->isSelfMessage() ?
+│   │
+│   ├── TRUE → [Luồng timer]
+│   │   │
+│   │   ├── [Tree] msg == helloTimer?
+│   │   │   │
+│   │   │   ├── YES → GỬI HELLO
+│   │   │   │   ├── Gọi sendHello() — chỉ đóng gói + gửi
+│   │   │   │   └── scheduleAt(now + helloInterval, helloTimer)
+│   │   │   │
+│   │   │   └── NO → kiểm tra msg == inactivityTimer của neighbor nào đó
+│   │   │       │
+│   │   │       └── YES → INACTIVITY TIMER CHÁY
+│   │   │           ├── [Action] neighbor.state = Down
+│   │   │           ├── [Action] neighbor.IDNeighbor = 0
+│   │   │           └── Delete msg
+│   │   │
+│   │   └── [Luồng timer] KẾT THÚC
+│   │
+│   └── FALSE → [Luồng gói tin]
+│       │
+│       ├── Parse header + data từ Mess
+│       ├── [Tree] pktType ?
+│       │   │
+│       │   ├── == 1 (Hello) → XỬ LÝ HELLO
+│       │   │   │
+│       │   │   ├── Gọi processHello(hdr, data, iface, ifIndex, myRouterId)
+│       │   │   │   └── Trả về bool (true = Hello hợp lệ)
+│       │   │   │
+│       │   │   └── [Tree] processHello trả về true?
+│       │   │       │
+│       │   │       ├── YES → Reset InactivityTimer
+│       │   │       │   ├── Nếu có timer cũ → cancel + delete
+│       │   │       │   ├── Tạo mới inactivityTimer
+│       │   │       │   └── scheduleAt(now + routerDeadInterval, ...)
+│       │   │       │
+│       │   │       └── NO → Không làm gì (Hello invalid)
+│       │   │
+│       │   ├── [sau này] == 2 (DD) → XỬ LÝ DATABASE DESCRIPTION
+│       │   ├── [sau này] == 3 (LSR) → XỬ LÝ LINK STATE REQUEST
+│       │   ├── [sau này] == 4 (LSU) → XỬ LÝ LINK STATE UPDATE
+│       │   └── [sau này] == 5 (LSAck) → XỬ LÝ LINK STATE ACK
+│       │
+│       └── [Luồng gói tin] KẾT THÚC: delete msg
+
+
+===============================================================================
+CHI TIẾT TỪNG HÀM
+===============================================================================
+
+[Flow] helloData::sendHello(ifIndex, state, routerId, mod)
+──────────────────────────────────────────────────────────
+│
+├── 1. Build Hello body (Section A.3.2)
+│   ├── NetworkMask = iface->mask (mặc định 0, P2P không dùng)
+│   ├── HelloInterval = state.interfaces[ifIndex].helloInterval
+│   ├── Options = OPT_E (ExternalRoutingCapability)
+│   ├── RouterPriority = 0 (P2P không dùng)
+│   ├── RouterDeadInterval = state.interfaces[ifIndex].routerDeadInterval
+│   ├── DesignatedRouter = 0 (P2P không có DR)
+│   ├── BackupDesignatedRouter = 0 (P2P không có BDR)
+│   └── Neighbor list:
+│       └── [Loop] Với mỗi neighbor của mỗi interface
+│           └── Nếu neighbor.state >= NBR_INIT
+│               └── put32(neighbor.IDNeighbor)
+│
+└── 2. OspfMess::send(1, body, routerId, 0, ifIndex, mod)
+
+
+[Flow] helloData::processHello(hdr, data, iface, ifIndex, myRouterId)
+──────────────────────────────────────────────────────────────────────
+│
+├── 1. Parse Hello body
+│   ├── get32 → networkMask
+│   ├── get16 → helloInterval
+│   ├── get8  → options
+│   ├── get8  → routerPriority (bỏ qua)
+│   ├── get16 → deadInterval
+│   ├── get32 → designatedRouter (bỏ qua)
+│   ├── get32 → backupDesignatedRouter (bỏ qua)
+│   └── [Loop] Đọc tiếp đến hết data → neighbor list
+│       └── Mỗi lần get32 → 1 neighbor ID
+│
+├── 2. Validate (Section 10.5)
+│   ├── Nếu helloInterval != iface->helloInterval → return false
+│   ├── Nếu deadInterval != iface->routerDeadInterval → return false
+│   ├── NetworkMask: bỏ qua trên P2P (RFC exception)
+│   └── Options E-bit: phải match area (backbone bắt buộc E=1)
+│
+├── 3. Lấy neighbor data
+│   └── nbr = iface->neighbor
+│
+├── 4. Cập nhật neighbor thông tin
+│   ├── nbr->IDNeighbor = hdr.routerId (Section 10.5: trên P2P, source = Router ID)
+│   ├── nbr->IPNeighbor = IP source (Section 10.5)
+│   └── nbr->priorityNeighbor = routerPriority từ Hello body (Section 10.5)
+│
+├── 5. NEIGHBOR STATE MACHINE
+│   │
+│   ├── [Tree] nbr->state ?
+│   │   │
+│   │   ├── == Down:
+│   │   │   └── nbr->state = Init
+│   │   │
+│   │   ├── == Init, 2Way, ExStart, Exchange, Loading, Full:
+│   │   │   └── Không đổi state (HelloReceived không đổi state ở >= Init)
+│   │   │
+│   │   └── (luôn chạy tiếp xuống dưới để kiểm tra 2WayReceived)
+│   │
+│   ├── Kiểm tra self trong neighbor list của gói Hello
+│   │   │
+│   │   ├── CÓ thấy self:
+│   │   │   │
+│   │   │   └── [Tree] nbr->state ?
+│   │   │       │
+│   │   │       ├── == Init:
+│   │   │       │   └── [Tree] P2P? (Section 10.4)
+│   │   │       │       ├── YES → nbr->state = ExStart (P2P luôn adjacency)
+│   │   │       │       └── NO (broadcast) → nbr->state = NBR_TWOWAY
+│   │   │       │
+│   │   │       └── == 2Way trở lên:
+│   │   │           └── Không đổi (đã bidirectional rồi)
+│   │   │
+│   │   └── KHÔNG thấy self:
+│   │       │
+│   │       └── [Tree] nbr->state >= 2Way?
+│   │           ├── YES: nbr->state = NBR_INIT (mất bidirectional)
+│   │           └── NO: không đổi
+│   │
+│   └── 6. Return true (Hello hợp lệ)
+
+
+===============================================================================
+KẾT QUẢ DỰ KIẾN SAU KHI 1a HOÀN TẤT
+===============================================================================
+
+Trạng thái mong đợi trên MỖI ROUTER sau khi Hello Protocol chạy ổn định:
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                    KẾT QUẢ 1a — HELLO PROTOCOL                        │
+├────────────────────────────────────────┬───────────────────────────────┤
+│ Thành phần                             │ Giá trị                       │
+├────────────────────────────────────────┼───────────────────────────────┤
+│ Interface.state                        │ PointToPoint (3)              │
+│ Interface.helloInterval                │ 10 (đang gửi Hello định kỳ)  │
+│ helloTimer                             │ Đang chạy (loop vô hạn)      │
+├────────────────────────────────────────┼───────────────────────────────┤
+│ Neighbor.state                         │ Init → 2Way                  │
+│ Neighbor.IDNeighbor                    │ Router ID của neighbor (≠ 0) │
+│ Neighbor.IPNeighbor                    │ IP source của neighbor       │
+│ Neighbor.inactivityTimer               │ Đang chạy (reset mỗi Hello)  │
+├────────────────────────────────────────┼───────────────────────────────┤
+│ LSDB (routerLSAs)                      │ Có 1 LSA: Router-LSA của     │
+│                                        │ chính mình, chỉ stub links   │
+│                                        │ (tạo ở initialize, không phải│
+│                                        │  kết quả của Hello)           │
+├────────────────────────────────────────┼───────────────────────────────┤
+│ P2P links trong LSDB                   │ CHƯA CÓ (cần neighbor Full)  │
+│ LSDB của neighbor                      │ CHƯA ĐỒNG BỘ                 │
+│ RoutingTable                           │ RỖNG                         │
+│ SPF vertices                           │ RỖNG                         │
+└────────────────────────────────────────┴───────────────────────────────┘
+
+Ví dụ với mạng 4 router:
+         R1 ─── R2
+          \    /
+           R4
+           │
+           R6
+
+Sau Hello, mỗi router đã biết neighbor trực tiếp:
+  R1: biết R2, R4 (đều 2Way)
+  R2: biết R1, R4 (đều 2Way)
+  R4: biết R1, R2, R6 (đều 2Way)
+  R6: biết R4 (2Way)
+
+Điều kiện để chuyển sang 1b (Database Sync):
+  - neighbor.state == 2Way (trên P2P)
+  - Section 10.4: P2P luôn form adjacency → chuyển ExStart
+  - interface.state == PointToPoint

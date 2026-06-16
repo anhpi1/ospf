@@ -39,9 +39,11 @@ struct LSAHeader
     uint8_t type;
     uint32_t linkStateId;
     uint32_t advertisingRouter;
-    uint32_t sequenceNumber;
+    int32_t sequenceNumber;      // signed 32-bit (Section 12.1.6, RFC 2328)
     uint16_t checksum;
     uint16_t length;
+
+    void print(std::ostream& f) const;
 };
 
 struct LSARequest
@@ -49,6 +51,8 @@ struct LSARequest
     uint32_t LSType;
     uint32_t linkStateId;
     uint32_t advertisingRouter;
+
+    void print(std::ostream& f) const;
 };
 
 struct TOSData
@@ -56,16 +60,20 @@ struct TOSData
     uint8_t TOSid;
     uint8_t zero;
     uint16_t metric;
+
+    void print(std::ostream& f) const;
 };
 
 struct LSALink
 {
-    uint32_t linkID;    
+    uint32_t linkID;
     uint32_t linkData;
     uint8_t type;
     uint8_t numTOS;
     uint16_t metric;
     std::vector<TOSData> Data; // danh sách TOS entries, nếu numTOS > 0
+
+    void print(std::ostream& f) const;
 };
 
 struct LSA
@@ -75,6 +83,8 @@ struct LSA
     uint8_t zero;
     uint16_t numLinks;
     std::vector<LSALink> links; // nội dung LSA, định dạng tùy theo type
+
+    void print(std::ostream& f) const;
 };
 
 //cấu trúc trạng thái router
@@ -160,6 +170,8 @@ struct InterfaceData {
 // AuType — loại xác thực. Dự án không làm xác thực → không cần.
 // Authentication key — khóa xác thực. Dự án không làm xác thực → không cần.
     struct NeighborData* neighbor;                   // neighbor P2P duy nhất (P2P chỉ có 1 neighbor)
+
+    void print(std::ostream& f, int index) const;
 };
 
 struct NeighborData {
@@ -184,7 +196,8 @@ struct NeighborData {
 // một số biến timer tự định nghĩa để hoạt động trong omnetpp, không phải là timer OSPF gốc nhưng giúp mô phỏng dễ dàng hơn
     cMessage* rxmtTimer;         // timer retransmit DD/LS Request
     cMessage* inactivityTimer;   // timer theo dõi thời gian sống
-    
+
+    void print(std::ostream& f) const;
 };
 
 // Cấu trúc 1 đỉnh trong danh sách kề — biểu diễn kết quả SPF (đệ quy con trỏ)
@@ -195,6 +208,8 @@ struct SpfVertex {
     SpfVertex* parent;                           // con trỏ tới đỉnh cha (nullptr nếu là gốc)
     unsigned int nextHop;                        // index vào state->interfaces[], interface ra để tới đỉnh này
     uint16_t distance;                           // tổng chi phí từ gốc đến đỉnh này
+
+    void print(std::ostream& f, int depth = 0) const;
 };
 
 //
@@ -214,6 +229,8 @@ struct AreaData {
     bool transitCapability;                          // TRUE nếu có virtual link dùng vùng này làm transit area
     bool externalRoutingCapability;                  // TRUE = cho AS-external-LSA vào vùng; FALSE = stub area
     uint32_t stubDefaultCost;                        // cost default route nếu là stub + ABR, không stub → 0
+
+    void print(std::ostream& f) const;
 };
 
 //
@@ -231,6 +248,8 @@ struct RoutingTableEntry {
 // Link State Origin — LSA tham chiếu đến đích, chỉ MOSPF dùng.
 // Advertising Router — chỉ inter-area và AS-external. Single-area → không cần.
     uint32_t nextHop;                                // Router ID của hop kế tiếp
+
+    void print(std::ostream& f, int index) const;
 };
 
 //
@@ -258,10 +277,20 @@ class helloData
         static void sendHello(int ifIndex, OspfRouterState& state, uint32_t routerId, omnetpp::cSimpleModule* mod);
 
         // Xử lý gói Hello nhận được (RFC 2328 Section 10.5)
-        static void processHello(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                                 InterfaceData* iface, int ifIndex, uint32_t myRouterId,
-                                 omnetpp::cSimpleModule* mod);
+        // Chỉ parse + cập nhật state. KHÔNG đụng timer — handleMessage lo.
+        // Trả về true nếu Hello hợp lệ (đã pass validation).
+        static bool processHello(const headerOspf& hdr, const std::vector<uint8_t>& data,
+                                 InterfaceData* iface, int ifIndex, uint32_t myRouterId);
 };
+// Struct kết quả processDD (Rule 8: XxxResult pattern)
+struct DdResult {
+    bool valid;                // false → drop gói
+    bool negotiationDone;      // NegotiationDone event → chuyển Exchange
+    bool exchangeDone;         // ExchangeDone event → chuyển Loading/Full
+    bool shouldSendDD;         // Slave cần reply DD ngay
+    bool neighborStateChanged; // state changed → cần xử lý timer
+};
+
 class databaseDescriptionData
 {
     public:
@@ -271,37 +300,24 @@ class databaseDescriptionData
         uint32_t ddSequenceNumber;
         std::vector<LSAHeader> lsaHeaders;
 
-        // BƯỚC 1 ExStart: gửi DD rỗng (I=1,M=1,MS=1) để khởi động thương lượng Master/Slave
-        static void sendExStart(InterfaceData* iface, int ifIndex, uint32_t routerId,
-                                omnetpp::cSimpleModule* mod);
-        // BƯỚC 2 ExStart: nhận DD, thương lượng Master/Slave (RFC 2328 Section 10.6)
-        static void processExStart(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                                   InterfaceData* iface, int ifIndex, uint32_t myRouterId,
-                                   OspfRouterState& state, omnetpp::cSimpleModule* mod);
-        // GIAI ĐOẠN 2 BƯỚC 1: Master gửi DD chứa LSA headers từ LSDB
-        static void sendExchange(InterfaceData* iface, int ifIndex, uint32_t routerId,
-                                 OspfRouterState& state, omnetpp::cSimpleModule* mod);
-        // GIAI ĐOẠN 2 BƯỚC 2: Master nhận ACK từ Slave (RFC 2328 Section 10.6)
-        static void processExchangeForMaster(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                                             InterfaceData* iface, int ifIndex, uint32_t myRouterId,
-                                             OspfRouterState& state, omnetpp::cSimpleModule* mod);
-        // GIAI ĐOẠN 2 BƯỚC 2: Slave nhận DD từ Master, so sánh LSDB, gửi ACK
-        static void processExchangeForSlave(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                                            InterfaceData* iface, int ifIndex, uint32_t myRouterId,
-                                            OspfRouterState& state, omnetpp::cSimpleModule* mod);
+        // Gửi DD packet (RFC 2328 Section 10.8 + A.3.3)
+        static void sendDD(int ifIndex, OspfRouterState& state,
+                           uint32_t routerId, omnetpp::cSimpleModule* mod);
+
+        // Xử lý DD packet nhận (RFC 2328 Section 10.6)
+        // Chỉ parse + cập nhật state. KHÔNG đụng timer.
+        // Trả về DdResult chứa kết quả xử lý.
+        static DdResult processDD(const headerOspf& hdr,
+                                  const std::vector<uint8_t>& data,
+                                  InterfaceData* iface, uint32_t myRouterId,
+                                  const std::vector<LSA>& routerLSAs);
 };
+
 class linkStateRequestData
 {
     public:
         std::vector<LSARequest> requests;
 
-        // FLOW A — BƯỚC A1: gửi Link State Request (type 3) (RFC 10.9)
-        static void sendLSR(InterfaceData* iface, int ifIndex, uint32_t routerId,
-                                const std::vector<LSARequest>& reqs, omnetpp::cSimpleModule* mod);
-        // FLOW B: nhận LS Request (type 3), tìm LSA trong LSDB, gửi LSU trả lời (RFC 10.7)
-        static void processLSR(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                               InterfaceData* iface, int ifIndex, uint32_t myRouterId,
-                               OspfRouterState& state, omnetpp::cSimpleModule* mod);
 };
 
 class linkStateUpdateData
@@ -309,35 +325,14 @@ class linkStateUpdateData
     public:
         uint32_t numberOfLSA;
         std::vector<LSA> LSAs;
-
-        // FLOW A — BƯỚC A2: nhận LSU, cài LSDB, gửi LSAck (RFC 13, 13.2, 13.5)
-        static void processLSU(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                               InterfaceData* iface, int ifIndex, uint32_t myRouterId,
-                               OspfRouterState& state, omnetpp::cSimpleModule* mod);
-        // FLOW B: gửi Link State Update (type 4) trả lời LS Request
-        static void sendLSU(const std::vector<LSA>& lsas, InterfaceData* iface,
-                            int ifIndex, uint32_t routerId, omnetpp::cSimpleModule* mod);
 };
-
 
 //type 5
 class linkStateAcknowledgementData
 {
     public:
         std::vector<LSAHeader> data;
-
-        // Gửi Link State Acknowledgment (type 5) — danh sách LSAHeader
-        static void sendAck(const std::vector<LSAHeader>& headers,
-                            InterfaceData* iface, int ifIndex, uint32_t routerId,
-                            omnetpp::cSimpleModule* mod);
-        // Nhận LSAck (type 5), xóa LSA khỏi retransmission list
-        static void processAck(const headerOspf& hdr, const std::vector<uint8_t>& data,
-                               InterfaceData* iface, int ifIndex,
-                               OspfRouterState& state, omnetpp::cSimpleModule* mod);
 };
-
-//header OSPF packet
-
 class OspfMess : public omnetpp::cMessage
 {
     public:
@@ -382,6 +377,12 @@ class OspfRouterState {
         ~OspfRouterState();
 
         void printState();
+
+        // Log state sau transition, ghi vào state_dump/<subphase>/ (gọi từ handleMessage)
+        void logTransition(const char* subphase, const char* event,
+                           double simtime, int ifIndex);
+
+        void originateRouterLSA();
 };
 
 #endif

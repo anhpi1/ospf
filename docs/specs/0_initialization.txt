@@ -1,0 +1,464 @@
+================================================================================
+0 — INITIALIZATION & INFRASTRUCTURE (Khởi tạo hệ thống OSPF)
+  Section 4 (Functional Summary), Section 9.3 (Interface state machine),
+  Section 12.4 (Originating LSAs), A.4.2 (Router-LSA format)
+================================================================================
+
+Mục tiêu: Khởi tạo toàn bộ cấu trúc dữ liệu OSPF, thiết lập interface,
+         tạo Router-LSA ban đầu (stub links), chuẩn bị timer và gửi
+         Hello đầu tiên để kickstart Hello Protocol.
+
+Phạm vi: P2P single-area, không DR/BDR, không xác thực, không checksum.
+         Chạy ĐÚNG 1 LẦN khi router khởi động (initialize() trong OMNeT++),
+         không lặp lại trong suốt vòng đời mô phỏng.
+
+Lưu ý: Phase 0 không xử lý gói tin hay timer — nó là phần "trước khi
+       handleMessage() được gọi lần đầu tiên".
+
+===============================================================================
+CẤU TRÚC TỔNG QUAN (dạng tree)
+===============================================================================
+
+0: INITIALIZATION & INFRASTRUCTURE
+│
+├── [Flow] 0.A — HẠ TẦNG OMNeT++ — chạy 1 lần, tự động, không code
+│   └── Điều kiện vào: OMNeT++ simulation kernel khởi tạo mô-đun
+│       │
+│       ├── 1. Đọc file .ned → tạo 10 module routerOspf (r1..r10)
+│       │   └── Mỗi module có N gate (số lượng kết nối của router đó)
+│       │       (Ví dụ: r1 có 2 gate — kết nối với r2 và r4)
+│       │
+│       ├── 2. Thiết lập kết nối giữa các gate
+│       │   └── Mỗi cặp gate <-> gate là 1 link P2P với delay=10ms
+│       │
+│       ├── 3. OMNeT++ gọi initialize() trên mỗi router
+│       │   └── Thứ tự: r1 → r2 → ... → r10 (tuần tự, không xác định
+│       │       thứ tự theo chuẩn nhưng trong thực tế là theo thứ tự
+│       │       khai báo submodules trong .ned)
+│       │
+│       └── 4. [Done] Hệ thống sẵn sàng chạy code OSPF
+│
+├── [Flow] 0.B — OspfRouterState CONSTRUCTOR — chạy 1 lần, đồng bộ
+│   └── Điều kiện vào: called from new OspfRouterState(routerId, n)
+│       │
+│       ├── 1. Gán routerID
+│       │   └── routerID = tham số đầu vào (từ tên module: r1→1, ...)
+│       │
+│       ├── 2. [Loop] Khởi tạo interfaces[] — 1 lần cho mỗi interface
+│       │   ├── Số lần lặp: numInterfaces (số gate của router)
+│       │   ├── Điều kiện kết thúc: hết interfaces
+│       │   └── Thân loop: với mỗi interface i
+│       │       │
+│       │       ├── 2a. Gán tham số cấu hình interface (Section 9, trang 63-66)
+│       │       │   ├── type = P2P (1)
+│       │       │   ├── state = Down (0) — chưa sẵn sàng
+│       │       │   ├── ipAddress = routerId (P2P: IP = Router ID)
+│       │       │   ├── mask = 0 (P2P unnumbered: không dùng)
+│       │       │   ├── areaID = 0 (backbone 0.0.0.0, single-area)
+│       │       │   ├── helloInterval = 10 (giây, rút gọn 10×)
+│       │       │   ├── routerDeadInterval = 40 (giây, rút gọn 10×)
+│       │       │   ├── infTransDelay = 1 (giây)
+│       │       │   ├── routerPriority = 0 (P2P không bầu DR)
+│       │       │   ├── cost = 1 (mặc định, configurable sau)
+│       │       │   └── rxmtInterval = 5 (giây, rút gọn 10×)
+│       │       │
+│       │       ├── 2b. Cấp phát NeighborData (Section 10, trang 82)
+│       │       │   ├── IDNeighbor = 0 (chưa biết neighbor)
+│       │       │   ├── state = Down (0)
+│       │       │   ├── isMaster = false
+│       │       │   ├── ddSequenceNumber = 0
+│       │       │   ├── lastDdOptions = 0
+│       │       │   ├── lastDdIMs = 0
+│       │       │   ├── inactivityTimer = nullptr (tạo sau khi cần)
+│       │       │   └── rxmtTimer = nullptr (tạo sau khi cần)
+│       │       │
+│       │       └── 2c. 3 list rỗng (databaseSummary, request, retransmission)
+│       │           └── Chưa có dữ liệu, chờ đến ExStart/Exchange
+│       │
+│       ├── 3. Khởi tạo AreaData (Section 6, trang 49-51)
+│       │   ├── areaID = 0 (backbone)
+│       │   ├── transitCapability = false
+│       │   ├── externalRoutingCapability = true (backbone)
+│       │   ├── stubDefaultCost = 0
+│       │   ├── interfaceIndices = [0, 1, ..., n-1]
+│       │   ├── routerLSAs = [] (rỗng, chưa có LSA nào)
+│       │   └── spfVertices = [] (rỗng, chưa tính SPF)
+│       │
+│       ├── 4. Khởi tạo RoutingTable = [] (rỗng — Section 11)
+│       │
+│       └── 5. [Done] RouterState sẵn sàng
+│
+├── [Flow] 0.C — InterfaceUp EVENT — chạy 1 lần, ngay sau constructor
+│   └── Điều kiện: interface.state == Down, nhận InterfaceUp event (Section 9.3)
+│       │
+│       ├── [Parallel] XỬ LÝ TỪNG INTERFACE — song song về mặt logic,
+│       │   tuần tự trong code (for loop)
+│       │   │
+│       │   └── Mỗi interface i:
+│       │       │
+│       │       ├── 1. Chuyển interface.state: Down → PointToPoint
+│       │       │   └── (Section 9.3: P2P → PointToPoint, không Waiting)
+│       │       │
+│       │       └── 2. Khởi động Hello Timer
+│       │           └── [TODO] scheduleAt(now + helloInterval, helloTimer)
+│       │               → helloTimer là timer GLOBAL của router, không phải
+│       │                 per-interface. Khi cháy, gửi Hello trên TẤT CẢ interface.
+│       │
+│       └── [Done] Tất cả interface ở PointToPoint
+│
+├── [Flow] 0.D — ROUTER-LSA ORIGINATION (Section 12.4 + A.4.2)
+│   └── Điều kiện: router mới khởi tạo, cần tạo Router-LSA đầu tiên
+│       (RFC: originateRouterLSA() được gọi mỗi khi interface state thay đổi)
+│       │
+│       ├── 1. Tạo LSA mới (cấp phát LSA object)
+│       │   │
+│       │   ├── 1a. Điền LSA Header (20 byte — Section 12.1 + A.4.1)
+│       │   │   ├── age = 0 (LSA mới tạo)
+│       │   │   ├── options = OPT_E (ExternalRoutingCapability)
+│       │   │   ├── type = 1 (Router-LSA)
+│       │   │   ├── linkStateId = routerID (Router-LSA: = Router ID)
+│       │   │   ├── advertisingRouter = routerID
+│       │   │   ├── sequenceNumber = 0x80000001 (giá trị bắt đầu, RFC Section 12.1.6)
+│       │   │   ├── checksum = 0 (dự án bỏ qua checksum)
+│       │   │   └── length = 20 + 4 + Σ links (sẽ tính sau)
+│       │   │
+│       │   ├── 1b. Điền flags (A.4.2)
+│       │   │   ├── bit B = 0 (single-area, không ABR)
+│       │   │   ├── bit E = 0 (không ASBR)
+│       │   │   └── bit V = 0 (không virtual link)
+│       │   │
+│       │   ├── 1c. [Loop] Xây links[] — 1 link/interface (Section 12.4.1)
+│       │   │   ├── Số lần lặp: numInterfaces
+│       │   │   ├── Điều kiện kết thúc: hết interfaces
+│       │   │   └── Thân loop: với mỗi interface i
+│       │   │       │
+│       │   │       └── [Tree] Xét interface.state
+│       │   │           │
+│       │   │           ├── == Down → BỎ QUA, không thêm link nào
+│       │   │           │   (Section 12.4.1: "If state is Down, no links added")
+│       │   │           │
+│       │   │           ├── == Loopback → Thêm Type 3 stub link
+│       │   │           │   ├── linkID = ipAddress
+│       │   │           │   ├── linkData = 0xFFFFFFFF (host route mask)
+│       │   │           │   └── cost = 0
+│       │   │           │
+│       │   │           └── == PointToPoint (Phase 0: sau InterfaceUp)
+│       │   │               │
+│       │   │               ├── [Tree] Neighbor.state == Full?
+│       │   │               │   ├── YES → Thêm Type 1 link (P2P)
+│       │   │               │   │   ├── linkID = neighbor.RouterID
+│       │   │               │   │   ├── linkData = ipAddress (của interface này)
+│       │   │               │   │   └── cost = iface.cost
+│       │   │               │   └── NO → KHÔNG thêm Type 1 (chưa Full)
+│       │   │               │
+│       │   │               └── Thêm Type 3 stub link (Section 12.4.1.1)
+│       │   │                   ├── Khi nào: interface.state == PointToPoint
+│       │   │                   │   (bất kể neighbor state)
+│       │   │                   ├── linkID = neighbor.IPNeighbor (Option 1, mục 12.4.1.1)
+│       │   │                   │   Nếu chưa biết neighbor.IP → dùng 0.0.0.0
+│       │   │                   ├── linkData = 0xFFFFFFFF (host route, /32)
+│       │   │                   └── cost = iface.cost (hoặc 0? RFC: interface cost)
+│       │   │
+│       │   └── 1d. Cập nhật LSA.length = 20 + 4 + numLinks * 12
+│       │       (20 byte header + 4 byte flags+zero+numLinks + numLinks * 12 byte link)
+│       │
+│       ├── 2. Thay thế LSA cũ trong LSDB (nếu có)
+│       │   └── (Section 12.4: "replace any previous version")
+│       │       [Loop] Tìm trong area.routerLSAs[]
+│       │       ├── Nếu tìm thấy LSA cũ của router này:
+│       │       │   └── Thay thế bằng LSA mới
+│       │       └── Nếu không tìm thấy:
+│       │           └── Thêm LSA mới vào cuối danh sách
+│       │
+│       ├── 3. [TODO] Flood LSA ra tất cả interface (chuyển GĐ4)
+│       │   └── (Phase 0: chưa flood, chỉ lưu vào LSDB local)
+│       │
+│       └── 4. [Done] LSDB có 1 Router-LSA (của chính mình, stub links)
+│
+├── [Flow] 0.E — TIMER INFRASTRUCTURE (Section 4.4 — Basic implementation)
+│   └── Điều kiện: cần tạo các timer OMNeT++ để điều khiển giao thức
+│       │
+│       ├── 1. Tạo helloTimer (cMessage*)
+│       │   ├── Loại: interval timer (Section 4.4: "fire at continuous intervals")
+│       │   ├── Khởi tạo: new cMessage("helloTimer")
+│       │   └── Lịch: scheduleAt(now + helloInterval, helloTimer)
+│       │       → Phát Hello đầu tiên không cần chờ timer:
+│       │         gửi Hello ngay (xem 0.F) rồi mới schedule timer lần 1
+│       │
+│       ├── 2. Tạo inactivityTimer (tạo sau, khi nhận Hello đầu tiên)
+│       │   └── Loại: single-shot timer (Section 4.4: "fire once")
+│       │       Tạo khi reset ở 1a.B, không tạo trước ở Phase 0
+│       │
+│       └── 3. Tạo rxmtTimer (tạo sau, khi vào ExStart)
+│           └── Loại: interval timer (retransmit định kỳ)
+│               Tạo khi chuyển ExStart, không tạo trước ở Phase 0
+│
+├── [Flow] 0.F — FIRST HELLO BURST (kickstart Hello Protocol)
+│   └── Điều kiện: sau khi interface Up, gửi Hello ngay lập tức
+│       (RFC Section 9.5: "Hello packets are sent at intervals" —
+│        không có quy định gửi ngay, nhưng để khởi động giao thức
+│        nhanh, gửi Hello ngay trước khi schedule timer)
+│       │
+│       └── [Loop] Gửi Hello trên tất cả interface
+│           ├── Số lần lặp: numInterfaces
+│           └── Thân loop: với mỗi interface i
+│               │
+│               ├── 1. Build Hello body (Section 9.5 + A.3.2)
+│               │   ├── networkMask = iface.mask (P2P: 0)
+│               │   ├── helloInterval = iface.helloInterval
+│               │   ├── options = OPT_E
+│               │   ├── routerPriority = iface.routerPriority
+│               │   ├── routerDeadInterval = iface.routerDeadInterval
+│               │   ├── designatedRouter = 0 (P2P)
+│               │   ├── backupDesignatedRouter = 0 (P2P)
+│               │   └── neighbor list: rỗng (chưa có neighbor nào)
+│               │       → Ở lần Hello đầu tiên, chưa biết neighbor nào,
+│               │         nên neighbor list = [] (body = 20 bytes)
+│               │
+│               └── 2. OspfMess::send(1, body, routerId, areaId, ifIndex)
+│                   → Gửi Hello ra gate$o[ifIndex]
+│
+├── [Flow] 0.G — STATE DUMP & LOGGING INFRASTRUCTURE
+│   └── Điều kiện: cơ chế ghi lại trạng thái để debug
+│       │
+│       ├── 1. Tạo thư mục state_dump/ (nếu chưa có)
+│       ├── 2. Tạo thư mục state_dump/<subphase>/ cho từng phase
+│       └── 3. [Action] Ghi state dump lần đầu (gọi từ initialize)
+│           └── printState() → state_dump/0.log (trạng thái ban đầu)
+│
+└── ── (Kết thúc Phase 0, chuyển tiếp sang Phase 1a) ──
+    │
+    ├── Sau Phase 0, helloTimer đã cháy lần đầu và schedule lần 2
+    │   → handleMessage bắt đầu được gọi định kỳ cho timer
+    │
+    ├── Mỗi router đã có Router-LSA trong LSDB (stub links)
+    │   → Chưa flood, flood sẽ xảy ra khi có neighbor Full (GĐ4)
+    │
+    ├── Các interface đã ở PointToPoint
+    │   → Ready for Hello Protocol
+    │
+    └── Các neighbor đều ở Down
+        → Chờ Hello từ neighbor để chuyển Init
+
+
+===============================================================================
+CHI TIẾT: CẤU TRÚC DỮ LIỆU LIÊN QUAN
+===============================================================================
+
+(Lưu ý: Không liệt kê chi tiết struct — đã có trong ospf_struct.h.
+ Chỉ mô tả cách dữ liệu được thao tác trong Phase 0.)
+
+InterfaceData — mỗi interface được khởi tạo:
+├── type=1 (P2P), state=IF_DOWN → IF_POINTTOPOINT (sau 0.C)
+├── helloInterval=10, routerDeadInterval=40, cost=1, rxmtInterval=5
+├── ipAddress=routerID, mask=0, areaID=0
+└── neighbor = new NeighborData (cấp phát tĩnh, 1 neighbor/interface)
+
+NeighborData — tất cả ở trạng thái mặc định:
+├── state=NBR_DOWN, IDNeighbor=0, isMaster=0, ddSequenceNumber=0
+├── inactivityTimer=nullptr (tạo động sau)
+└── rxmtTimer=nullptr (tạo động sau)
+
+AreaData — area 0.0.0.0 (backbone):
+├── interfaceIndices = [0..n-1]
+├── routerLSAs = [1 Router-LSA của chính mình]
+└── spfVertices = [], RoutingTable = []
+
+
+===============================================================================
+CẤU TRÚC XỬ LÝ TRONG initialize() (theo Rule 8)
+===============================================================================
+
+initialize()
+│
+├── 1. [0.A] Lấy Router ID từ tên module
+│   └── name = getName() → "r1" → std::stoi("1") → routerId = 1
+│   └── Lưu ý: giới hạn dự án — chỉ dùng tên module r1..r10
+│       không dùng IP thật
+│
+├── 2. [0.B] Khởi tạo state
+│   └── state = new OspfRouterState(routerId, n)
+│
+├── 3. [0.C] InterfaceUp cho tất cả interface
+│   ├── [Loop] for i = 0..n-1
+│   └──   state->interfaces[i].state = IF_POINTTOPOINT
+│
+├── 4. [0.D] [TODO] originateRouterLSA()
+│   └── Tạo Router-LSA với stub links cho mỗi interface
+│       → state->area.routerLSAs.push_back(lsa)
+│
+├── 5. [0.F] Gửi Hello ngay lần đầu (không chờ timer)
+│   └── [Loop] for i = 0..n-1
+│       └── helloData::sendHello(i, *state, routerId, this)
+│
+├── 6. [0.E] Tạo + schedule helloTimer
+│   ├── helloTimer = new cMessage("helloTimer")
+│   └── scheduleAt(simTime() + helloInterval, helloTimer)
+│
+└── 7. [0.G] Ghi state dump lần đầu (tùy chọn)
+    └── state->printState() hoặc logTransition("0", "initialize", ...)
+
+
+===============================================================================
+CẤU TRÚC XỬ LÝ TRONG handleMessage (Phase 0 không liên quan)
+===============================================================================
+
+Phase 0 CHẠY TRƯỚC khi handleMessage() được gọi lần đầu tiên.
+Sau khi initialize() kết thúc, OMNeT++ kernel bắt đầu gọi
+handleMessage() cho các timer và gói tin.
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│   THỜI GIAN BIỂU (mô phỏng, timer rút gọn 10×):                        │
+│                                                                         │
+│   t=0.0s   initialize() chạy → gửi Hello burst lần 1                   │
+│            → schedule helloTimer (lần 2)                                │
+│   t=1.0s   helloTimer cháy → gửi Hello burst lần 2                     │
+│            → schedule helloTimer (lần 3)                                │
+│   t=2.0s   helloTimer cháy → gửi Hello burst lần 3                     │
+│   ...                                                                   │
+│                                                                         │
+│   Song song: nhận Hello từ các router khác → xử lý ở handleMessage()   │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+
+===============================================================================
+CHI TIẾT TỪNG HÀM
+===============================================================================
+
+[Flow] OspfRouterState::OspfRouterState(routerId, numInterfaces)
+───────────────────────────────────────────────────────────────
+│
+├── Đây là constructor của OspfRouterState — khởi tạo toàn bộ state
+│   của 1 router OSPF (Section 9 + Section 10)
+│
+├── Input: routerId = uint32_t, numInterfaces = int
+│
+├── Output: OspfRouterState* sẵn sàng sử dụng
+│
+└── Các bước chi tiết như mô tả ở 0.B
+
+
+[Flow] originateRouterLSA(state)
+────────────────────────────────
+│
+├── Tạo Router-LSA cho area duy nhất (Section 12.4.1)
+│
+├── Input: OspfRouterState& state
+│
+├── Output: Cập nhật state.area.routerLSAs[]
+│
+├── 1. Tạo LSA object mới
+│   ├── header = {age:0, opt:OPT_E, type:1, linkStateId:routerID,
+│   │            advRouter:routerID, seq:0x80000001, chk:0, len:0}
+│   ├── flags = 0 (B=0, E=0, V=0)
+│   ├── numLinks = 0 (sẽ đếm sau)
+│   └── links = []
+│
+├── 2. [Loop] Với mỗi interface trong state.interfaces[]
+│   │
+│   └── [Tree] iface.state ?
+│       │
+│       ├── == Down → skip
+│       │
+│       ├── == Loopback → link {type:3, linkID:ip, linkData:0xFFFFFFFF, cost:0}
+│       │
+│       └── == PointToPoint:
+│           ├── [Tree] Nếu neighbor.state == Full (chưa, Phase 0)
+│           │   → không thêm Type 1
+│           └── Thêm Type 3 stub link:
+│               link {type:3, linkID:neighborIP (hoặc 0), linkData:0xFFFFFFFF,
+│                      cost:iface.cost}
+│
+├── 3. Cập nhật numLinks, length
+│
+└── 4. Thay thế LSA cũ trong LSDB:
+    ├── Nếu đã có LSA của router này (cùng advRouter) → thay thế
+    └── Chưa có → push_back vào area.routerLSAs[]
+        (lần đầu tiên: chưa có → push_back)
+
+Lưu ý: Phase 0 chưa flood LSA. Flood sẽ xảy ra sau khi có neighbor ở
+trạng thái Full (Giai đoạn 4 — Flooding). Ở Phase 0, LSA chỉ tồn tại
+trong LSDB local.
+
+
+
+[Flow] helloData::sendHello lần đầu (0.F)
+────────────────────────────────────────
+│
+├── Giống sendHello bình thường (xem 1a)
+│
+├── Điểm khác biệt duy nhất: neighbor list LUÔN RỖNG
+│   vì chưa có neighbor nào (tất cả neighbor.state == Down)
+│
+└── Body = 20 bytes (không neighbor ID nào)
+    networkMask(4) + helloInt(2) + options(1) + priority(1) +
+    deadInt(4) + DR(4) + BDR(4) = 20
+
+
+===============================================================================
+KẾT QUẢ DỰ KIẾN SAU KHI 0 HOÀN TẤT
+===============================================================================
+
+Trạng thái mong đợi trên MỖI ROUTER ngay sau initialize():
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│               KẾT QUẢ 0 — INITIALIZATION & INFRASTRUCTURE                  │
+├──────────────────────────────────┬─────────────────────────────────────────┤
+│ Thành phần                       │ Giá trị                                 │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ Router ID                        │ 1..10 (từ tên module r1..r10)           │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ interfaces[].state               │ PointToPoint (3) — tất cả interface     │
+│ interfaces[].type                │ 1 (P2P)                                 │
+│ interfaces[].helloInterval       │ 10 (giây)                               │
+│ interfaces[].routerDeadInterval  │ 40 (giây)                               │
+│ interfaces[].cost                │ 1 (mặc định)                            │
+│ interfaces[].rxmtInterval        │ 5 (giây)                                │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ interfaces[].neighbor.state      │ Down (0) — tất cả neighbor              │
+│ interfaces[].neighbor.IDNeighbor │ 0 (chưa biết)                           │
+│ interfaces[].neighbor.inactivityTimer │ nullptr (chưa tạo)                 │
+│ interfaces[].neighbor.rxmtTimer      │ nullptr (chưa tạo)                  │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ helloTimer                       │ Đã schedule (lần cháy đầu tiên)         │
+│ inactivityTimer (các neighbor)   │ Chưa tạo (sẽ tạo khi nhận Hello)        │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ area.routerLSAs                  │ [1 LSA] — Router-LSA của chính mình     │
+│                                  │   + stub links cho mỗi interface        │
+│                                  │   + KHÔNG có Type 1 link (chưa Full)    │
+│ area.spfVertices                 │ [] — rỗng                              │
+├──────────────────────────────────┼─────────────────────────────────────────┤
+│ RoutingTable                     │ [] — rỗng (chưa tính SPF)               │
+└──────────────────────────────────┴─────────────────────────────────────────┘
+
+Ví dụ với mạng 10 router (theo ospf.ned):
+         R1 ─── R2 ─── R3 ─── R8
+         │   / │       │       │
+         │  /  │       │       │
+         │ /   │       │       │
+         R4 ─── R5 ─── R9      R10
+         │       │
+         │       │
+         R6      R7
+
+Sau Phase 0, mỗi router có:
+- 1 Router-LSA trong LSDB với N stub links (N = số interface của router đó)
+  Ví dụ R1: 2 stub links (R1→R2, R1→R4)
+  Ví dụ R4: 4 stub links (R4→R1, R4→R2, R4→R5, R4→R6)
+- Tất cả interface ở PointToPoint
+- Tất cả neighbor ở Down
+- Chưa có Type 1 link nào (P2P link chỉ xuất hiện khi neighbor Full)
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ CHUYỂN TIẾP                                                            │
+│                                                                         │
+│ Sau Phase 0, router bắt đầu vòng đời OSPF:                             │
+│ → Hello Protocol (Phase 1a) — gửi/nhận Hello, phát hiện neighbor       │
+│ → ExStart (Phase 1b1) — thương lượng Master/Slave                      │
+│ → Exchange (Phase 1b2) — trao đổi database summary                     │
+│ → Loading (Phase 1c) — tải LSA còn thiếu                               │
+│ → Full (Phase 1d) — adjacency established                               │
+│ → Flooding & SPF (Phase 2+) — tính toán routing table                  │
+└────────────────────────────────────────────────────────────────────────────┘

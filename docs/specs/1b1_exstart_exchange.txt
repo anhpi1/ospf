@@ -1,0 +1,656 @@
+================================================================================
+1b1 — ExStart + Exchange (Thương lượng Master/Slave + Trao đổi LSA Header)
+  Section 10.3 (Neighbor state machine — events NegotiationDone, ExchangeDone,
+                SeqNumberMismatch)
+  10.6 (Receiving Database Description Packets)
+  10.8 (Sending Database Description Packets)
+  A.3.3 (DD packet format)
+================================================================================
+
+Mục tiêu: Từ hai neighbor bidirectional (2Way), form adjacency qua 2 bước:
+  ExStart  — thương lượng master/slave + DD sequence number
+  Exchange — trao đổi danh sách LSA header để mỗi bên biết LSA nào còn thiếu
+
+Lưu ý scope dự án (tra trong docs/plan thinking/):
+  - P2P only → mỗi interface có đúng 1 neighbor (cấp phát tĩnh)
+  - Single-area (backbone 0.0.0.0)
+  - Router-LSA only (type=1), không có Network/Summary/AS-external-LSA
+  - Không xác thực (AuType=0), checksum luôn 0
+  - Interface MTU = 0 (bỏ qua trên P2P)
+
+===============================================================================
+CẤU TRÚC TỔNG QUAN (dạng tree)
+===============================================================================
+
+1b1: EXSTART + EXCHANGE
+│
+├── [Flow] KHỞI ĐỘNG — mỗi khi neighbor chuyển ExStart (Section 10.3)
+│   └── Điều kiện vào:  neighbor.state == 2Way AND P2P (Section 10.4)
+│                       → state = ExStart (xảy ra ở Hello, GĐ 1a)
+│       │
+│       ├── 1. Gán ddSequenceNumber = unique (simTime.raw() & 0xFFFFFFFF)
+│       ├── 2. isMaster = 1 (Section 10.3: "declares itself master")
+│       ├── 3. Gửi DD rỗng đầu tiên với I+M+MS bits (Section 10.8)
+│       └── 4. Start rxmtTimer (retransmit mỗi RxmtInterval giây)
+│
+├── [Parallel] HAI TIẾN TRÌNH SONG SONG — độc lập về thời gian
+│   │
+│   ├── 1b1.A — [Loop + Tree] XỬ LÝ DD PACKET ĐẾN (Section 10.6)
+│   │   ├── Điều kiện kích hoạt: mỗi khi nhận gói tin type=2 (DD)
+│   │   └── Phân nhánh theo neighbor.state:
+│   │       │
+│   │       ├── [Tree] state == ExStart → NEGOTIATION
+│   │       │   │
+│   │       │   └── Kiểm tra hai trường hợp hợp lệ:
+│   │       │       │
+│   │       │       ├── [Case 1] Slave — (Section 10.6 ExStart case 1)
+│   │       │       │   ├── Điều kiện: I+M+MS bits == 1
+│   │       │       │   ├──             body rỗng (data.size == 8)
+│   │       │       │   └──             hdr.routerId > myRouterId
+│   │       │       │       │
+│   │       │       │       └── Hành động:
+│   │       │       │           ├── isMaster = 0
+│   │       │       │           ├── ddSequenceNumber = ddSeq của gói (chấp nhận seq master)
+│   │       │       │           ├── Ghi nhận lastDdOptions, lastDdIMs (cho duplicate detection)
+│   │       │       │           ├── [QUAN TRỌNG] optionsNeighbor = options
+│   │       │       │           │   (RFC 10.6: "recorded in the Neighbor Options field")
+│   │       │       │           │   → dùng validate Options trong Exchange/Loading/Full
+│   │       │       │           └── → NegotiationDone (shouldSendDD=true)
+│   │       │       │
+│   │       │       ├── [Case 2] Master — (Section 10.6 ExStart case 2)
+│   │       │       │   ├── Điều kiện: I bit == 0
+│   │       │       │   ├──             MS bit == 0
+│   │       │       │   ├──             ddSeq == ddSequenceNumber của self
+│   │       │       │   └──             hdr.routerId < myRouterId
+│   │       │       │       │
+│   │       │       │       └── Hành động:
+│   │       │       │           ├── Giữ isMaster = 1 (không đổi)
+│   │       │       │           └── [QUAN TRỌNG] optionsNeighbor = options
+│   │       │       │               (RFC 10.6: "recorded in the Neighbor Options field")
+│   │       │       │               → NegotiationDone (shouldSendDD=false)
+│   │       │       │
+│   │       │       └── [Default] Không thỏa cả 2:
+│   │       │           └── Bỏ qua gói (ignore) — master sẽ retransmit sau RxmtInterval
+│   │       │
+│   │       ├── [Tree] state == Exchange → MASTER/SLAVE PROTOCOL (Section 10.6)
+│   │       │   │
+│   │       │   ├── [Check 1] DUPLICATE CHECK
+│   │       │   │   └── Nếu I, M, MS, Options, DD seq giống hệt gói cuối:
+│   │       │   │       ⚠ Cần lưu "last received DD seq" — struct NeighborData chưa có field riêng.
+│   │       │   │       lastDdIMs và lastDdOptions có sẵn. Với ddSeq:
+│   │       │   │       - Slave: dùng ddSequenceNumber (bằng seq của poll vừa nhận)
+│   │       │   │       - Master: cần trường riêng hoặc tính từ ddSequenceNumber-1?
+│   │       │   │       │
+│   │       │   │       ├── [Tree] isMaster?
+│   │       │   │       │   ├── Master: bỏ qua (discard)
+│   │       │   │       │   └── Slave: retransmit lại DD cuối (Section 10.8 Slave)
+│   │       │   │       └── Kết thúc xử lý cho gói này
+│   │       │   │
+│   │       │   ├── [Check 2] VALIDATION — nếu lỗi → SeqNumberMismatch
+│   │       │   │   ├── MS-bit inconsistent với isMaster?     → SeqNumberMismatch
+│   │       │   │   ├── I-bit == 1?                            → SeqNumberMismatch
+│   │       │   │   └── Options mismatch với optionsNeighbor? → SeqNumberMismatch
+│   │       │   │       (RFC 10.6: validate dùng Neighbor Options field)
+│   │       │   │       │
+│   │       │   │       └── [Tree] Hậu quả SeqNumberMismatch:
+│   │       │   │           ├── state = ExStart (Section 10.3)
+│   │       │   │           ├── Xóa 3 list: databaseSummary, request, retransmission
+│   │       │   │           ├── ddSequenceNumber++
+│   │       │   │           ├── isMaster = 1
+│   │       │   │           └── Gửi DD rỗng mới với I+M+MS bits (restart ExStart)
+│   │       │   │
+│   │       │   ├── [Check 3] SEQUENCE CHECK (Section 10.6)
+│   │       │   │   │
+│   │       │   │   ├── [Tree] isMaster?
+│   │       │   │   │   ├── Master: next seq phải == ddSequenceNumber
+│   │       │   │   │   └── Slave: next seq phải == ddSequenceNumber + 1
+│   │       │   │   │
+│   │       │   │   └── Nếu sai → SeqNumberMismatch (như trên)
+│   │       │   │
+│   │       │   └── [Action] ACCEPT — gói hợp lệ, xử lý nội dung (Section 10.6)
+│   │       │       │
+│   │       │       ├── [Loop] Với mỗi LSA header trong body DD:
+│   │       │       │   ├── [Check] LS type hợp lệ? (1-5, dự án chỉ có type 1)
+│   │       │       │   │   ├── Không hợp lệ → SeqNumberMismatch
+│   │       │       │   │   └── Type 5 trong stub area → SeqNumberMismatch (dự án non-stub)
+│   │       │       │   │
+│   │       │       │   ├── Tra LSDB: đã có LSA này chưa?
+│   │       │       │   │   (so sánh type + linkStateId + advertisingRouter)
+│   │       │       │   │   │
+│   │       │       │   │   ├── Chưa có, hoặc bản copy trong LSDB cũ hơn
+│   │       │       │   │   │   (Section 13.1: so sánh sequenceNumber → age → checksum)
+│   │       │       │   │   │   └── Thêm vào linkStateRequestList
+│   │       │       │   │   │
+│   │       │       │   │   └── Đã có và mới hơn hoặc bằng
+│   │       │       │   │       └── Bỏ qua
+│   │       │       │
+│   │       │       ├── Ghi nhận gói cuối (cho duplicate detection lần sau):
+│   │       │       │   nbr->lastDdOptions = options
+│   │       │       │   nbr->lastDdIMs = flags
+│   │       │       │   ⚠ Cần lưu ddSeq của gói này làm "last received DD seq"
+│   │       │       │
+│   │       │       ├── [Action] MASTER:
+│   │       │       │   ├── nbr->ddSequenceNumber++ (Section 10.6)
+│   │       │       │   ├── [Tree] Đã gửi hết databaseSummaryList AND M-bit == 0?
+│   │       │       │   │   ├── YES → ExchangeDone event
+│   │       │       │   │   └── NO → Gửi DD tiếp (poll tiếp theo)
+│   │       │       │   └── r.valid = true
+│   │       │       │
+│   │       │       └── [Action] SLAVE:
+│   │       │           ├── nbr->ddSequenceNumber = ddSeq (Section 10.6 Slave)
+│   │       │           ├── r.shouldSendDD = true (Slave luôn phải response)
+│   │       │           ├── [Tree] (flags & DD_M) == 0 AND
+│   │       │           │   đã gửi hết databaseSummaryList của self?
+│   │       │           │   ├── CÓ: r.exchangeDone = true
+│   │       │           │   │   (Section 10.6: Slave thấy ExchangeDone trước Master
+│   │       │           │   │    "Note that the slave always generates this event
+│   │       │           │   │    before the master.")
+│   │       │           │   └── KHÔNG: tiếp tục Exchange
+│   │       │           └── r.valid = true
+│   │       │
+│   │       └── [Tree] state == Loading/Full → DUPLICATE-ONLY (Section 10.6)
+│   │           ├── [Check] Options mismatch với optionsNeighbor? → SeqNumberMismatch
+│   │           ├── [Check] I-bit == 1? → SeqNumberMismatch
+│   │           └── Nếu duplicate:
+│   │               ├── [Tree] isMaster?
+│   │               │   ├── Master: discard
+│   │               │   └── Slave: retransmit DD cuối
+│   │
+│   ├── 1b1.B — [Loop + Tree] GỬI DD ĐỊNH KỲ (Section 10.8)
+│   │   ├── Điều kiện kích hoạt: rxmtTimer cháy
+│   │   └── Phân nhánh theo neighbor.state:
+│   │       │
+│   │       ├── [Tree] state == ExStart:
+│   │       │   └── Retransmit DD rỗng với I+M+MS bits (Section 10.8)
+│   │       │       └── schedule rxmtTimer tiếp
+│   │       │
+│   │       ├── [Tree] state == Exchange:
+│   │       │   │
+│   │       │   ├── [Tree] isMaster?
+│   │       │   │   ├── Master: retransmit DD cuối vì slave chưa ACK (Section 10.8 Master b)
+│   │       │   │   └── Slave: không retransmit (chỉ gửi khi nhận được poll từ master)
+│   │       │   │
+│   │       │   └── schedule rxmtTimer tiếp
+│   │       │
+│   │       └── [Tree] state == Loading/Full → KHÔNG gửi DD (timer nên được cancel)
+│   │
+│   └── 1b1.C — [Flow] XỬ LÝ ExchangeDone (Section 10.3)
+│       └── Điều kiện:  neighbor.state == Exchange AND ExchangeDone event
+│           │
+│           └── [Tree] linkStateRequestList rỗng?
+│               │
+│               ├── CÓ (không thiếu LSA) → state = Full
+│               │   └── [TODO] chuyển 1c (originate Router-LSA + flood)
+│               │
+│               └── KHÔNG (còn LSA cần kéo) → state = Loading
+│                   └── [TODO] chuyển 1b2 (gửi LSR, nhận LSU)
+
+│
+└── ── (Tương tác giữa các tiến trình) ──
+    │
+    ├── 1b1.A (xử lý DD đến) và 1b1.B (retransmit DD) giao tiếp qua
+    │   rxmtTimer và lastDdIMs/lastDdOptions:
+    │   - 1b1.A ghi nhận gói DD cuối vào neighbor.lastDdIMs/lastDdOptions
+    │   - 1b1.B kiểm tra rxmtTimer để quyết định retransmit
+    │   - 1b1.A quyết định cancel/schedule rxmtTimer khi state change
+    │
+    └── Hậu quả các sự kiện phá hủy adjacency:
+        ├── SeqNumberMismatch → ExStart (restart từ đầu)
+        ├── 1-Way (Hello không thấy self) → Init (mất bidirectional)
+        ├── InactivityTimer → Down (neighbor chết)
+        └── Tất cả đều: xóa 3 list (databaseSummary, request, retransmission)
+            + cancel rxmtTimer
+
+===============================================================================
+CHI TIẾT: CẤU TRÚC DỮ LIỆU SỬ DỤNG (đã có sẵn trong ospf_struct.h)
+===============================================================================
+
+NeighborData (mỗi interface có 1, cấp phát tĩnh)
+├── state:        OspfNeighborState (ExStart=4, Exchange=5, Loading=6, Full=7)
+├── isMaster:     unsigned int (1 = master, 0 = slave)
+├── ddSequenceNumber: uint32_t (số thứ tự DD hiện tại — đang gửi hoặc vừa nhận)
+├── lastDdOptions: uint8_t (Options từ gói DD cuối, dùng duplicate detection)
+├── lastDdIMs:     uint8_t (I+M+MS bits từ gói DD cuối, dùng duplicate detection)
+├── optionsNeighbor: uint8_t (Neighbor Options — lưu từ quá trình ExStart, dùng validate)
+│   ⚠ Không có "last received DD seq" riêng. Cần khi implement:
+│      - Master: lưu ddSeq trước khi increment, hoặc
+│      - Dùng ddSequenceNumber + trạng thái isMaster để suy ra
+├── databaseSummaryList: vector<LSAHeader> (toàn bộ LSA header LSDB khi vào Exchange)
+├── linkStateRequestList: vector<LSAHeader> (LSA cần kéo về — chờ 1b2)
+├── linkStateRetransmissionList: vector<LSARequest> (LSA đã gửi chờ ACK — dùng sau)
+├── rxmtTimer:    cMessage* (retransmit timer cho DD/LSR)
+└── inactivityTimer: cMessage* (chung với 1a)
+
+DdResult (struct kết quả processDD)
+├── valid:               bool (false → drop gói)
+├── negotiationDone:     bool (NegotiationDone event → chuyển Exchange)
+├── exchangeDone:        bool (ExchangeDone event → chuyển Loading/Full)
+├── shouldSendDD:        bool (cần gửi DD ngay: Slave response hoặc Master poll mới)
+└── neighborStateChanged: bool (state changed → handleMessage xử lý timer)
+
+LSAHeader (dùng trong databaseSummaryList và DD body)
+├── age:            uint16_t
+├── options:        uint8_t
+├── type:           uint8_t (luôn 1 — Router-LSA trong dự án)
+├── linkStateId:    uint32_t
+├── advertisingRouter: uint32_t
+├── sequenceNumber: int32_t
+├── checksum:       uint16_t
+└── length:         uint16_t
+
+databaseDescriptionData (class xử lý DD)
+├── interfaceMTU:   uint16_t
+├── options:        uint8_t
+├── flags:          uint8_t (I, M, MS bits)
+├── ddSequenceNumber: uint32_t
+├── lsaHeaders:     vector<LSAHeader> (các LSA header trong body DD)
+├── sendDD()        — gửi DD (Section 10.8 + A.3.3)
+└── processDD()     — xử lý DD nhận (Section 10.6), trả về DdResult
+
+
+===============================================================================
+CẤU TRÚC XỬ LÝ TRONG handleMessage (theo Rule 8)
+===============================================================================
+
+handleMessage(msg)
+│
+├── [Tree] msg->isSelfMessage() ?
+│   │
+│   ├── TRUE → [Luồng timer]
+│   │   │
+│   │   ├── [Tree] msg == helloTimer? (xử lý 1a — không thay đổi)
+│   │   │   └── YES → GỬI HELLO + schedule helloTimer
+│   │   │
+│   │   ├── [Tree] msg == rxmtTimer của neighbor nào đó?
+│   │   │   │
+│   │   │   └── YES → RETRANSMIT DD (1b1.B)
+│   │   │       │
+│   │   │       ├── [Tree] nbr->state?
+│   │   │       │   ├── == ExStart → sendDD + schedule rxmtTimer
+│   │   │       │   ├── == Exchange + isMaster → sendDD + schedule rxmtTimer
+│   │   │       │   └── khác → bỏ qua (cancel timer sau)
+│   │   │       └── Nếu state >= Loading → cancel rxmtTimer (không còn DD)
+│   │   │
+│   │   ├── [Tree] msg == inactivityTimer? (xử lý 1a — không thay đổi)
+│   │   │   └── YES → state = Down, xóa 3 list
+│   │   │
+│   │   └── [Luồng timer] KẾT THÚC
+│   │
+│   └── FALSE → [Luồng gói tin]
+│       │
+│       ├── Parse header + data từ Mess
+│       ├── [Tree] pktType ?
+│       │   │
+│       │   ├── == 1 (Hello) → XỬ LÝ HELLO (1a — không thay đổi)
+│       │   │   └── processHello → reset inactivityTimer
+│       │   │       └── [Tree] 2Way → ExStart? → khởi tạo 1b1
+│       │   │           ├── nbr->state = ExStart
+│       │   │           ├── ddSeq = unique, isMaster = 1
+│       │   │           └── sendDD(rỗng, I+M+MS) + schedule rxmtTimer
+│       │   │
+│       │   ├── == 2 (DD) → XỬ LÝ DD (1b1)
+│       │   │   │
+│       │   │   ├── Gọi processDD(hdr, data, iface, myRouterId)
+│       │   │   │   └── Trả về DdResult — KHÔNG đụng timer trong processDD
+│       │   │   │
+│       │   │   ├── [Tree] res.negotiationDone?
+│       │   │   │   │
+│       │   │   │   ├── YES → ExStart → Exchange (Section 10.3)
+│       │   │   │   │   ├── [Action] nbr->state = Exchange
+│       │   │   │   │   ├── [Action] Cancel rxmtTimer cũ (ExStart timer)
+│       │   │   │   │   ├── [Action] Xây databaseSummaryList từ LSDB
+│       │   │   │   │   │   (copy header của mọi Router-LSA trong area.routerLSAs)
+│       │   │   │   │   ├── [Action] Slave (shouldSendDD==true)
+│       │   │   │   │   │   └── sendDD ngay (Section 10.6: slave sends DD in response)
+│       │   │   │   │   ├── [Action] Schedule rxmtTimer mới (Exchange timer)
+│       │   │   │   │   └── Log transition
+│       │   │   │   │
+│       │   │   │   └── NO → không đổi state
+│       │   │   │
+│       │   │   ├── [Tree] res.exchangeDone?
+│       │   │   │   │
+│       │   │   │   ├── YES → Exchange → Loading/Full (Section 10.3)
+│       │   │   │   │   ├── [Action] Cancel rxmtTimer
+│       │   │   │   │   ├── [Action] [Tree] linkStateRequestList rỗng?
+│       │   │   │   │   │   ├── CÓ → state = Full
+│       │   │   │   │   │   └── KHÔNG → state = Loading
+│       │   │   │   │   ├── Log transition
+│       │   │   │   │   └── [TODO] 1c / 1b2 tiếp
+│       │   │   │   │
+│       │   │   │   └── NO → tiếp tục Exchange
+│       │   │   │
+│       │   │   ├── [Tree] res.shouldSendDD?
+│       │   │   │   └── YES → Slave gửi DD response (gọi sendDD)
+│       │   │   │       Hoặc Master gửi DD poll tiếp theo
+│       │   │   │
+│       │   │   └── [Tree] !res.valid?
+│       │   │       └── YES → drop (delete msg) — không làm gì thêm
+│       │   │
+│       │   ├── == 3 (LSR) → [TODO] 1b2 (Loading)
+│       │   ├── == 4 (LSU) → [TODO] 1b2 / 1c (Flooding)
+│       │   └── == 5 (LSAck) → [TODO] 1b2 / 1c (Acknowledgment)
+│       │
+│       └── [Luồng gói tin] KẾT THÚC: delete msg
+
+===============================================================================
+CHI TIẾT TỪNG HÀM
+===============================================================================
+
+[Flow] databaseDescriptionData::sendDD(ifIndex, state, routerId, mod)
+────────────────────────────────────────────────────────────────────────
+Gửi DD packet theo trạng thái neighbor (Section 10.8 + A.3.3).
+
+│
+├── 1. Xác định flags (I, M, MS) dựa vào state
+│   │
+│   ├── [Tree] nbr->state == ExStart:
+│   │   └── flags = I | M | MS (DD rỗng, I=1, M=1, MS=1)
+│   │       Section 10.8: "In state ExStart the router sends empty
+│   │       Database Description packets, with I, M and MS bits set."
+│   │
+│   └── [Tree] nbr->state == Exchange:
+│       ├── I = 0 (không còn Init)
+│       ├── M = ? (còn LSA header để gửi không?)
+│       │   └── [Loop/Recursion] Duyệt databaseSummaryList
+│       │       ├── Còn LSA chưa gửi → M = 1 (More)
+│       │       └── Hết → M = 0 (đây là DD cuối)
+│       └── MS = isMaster (1 nếu master, 0 nếu slave)
+│
+├── 2. Xây DD body (8 byte + N * 20 byte LSA header)
+│   ├── put16 — InterfaceMTU (0 cho P2P, không cần MTU check)
+│   ├── put8  — Options (OPT_E: ExternalRoutingCapability)
+│   ├── put8  — flags (I | M | MS)
+│   ├── put32 — ddSequenceNumber
+│   └── [Loop] Nếu state == Exchange:
+│       └── Gửi 1 hoặc nhiều LSA header từ databaseSummaryList
+│           (lấy từ đầu list, đánh dấu đã gửi)
+│           Mỗi LSA header = 20 byte
+│
+└── 3. OspfMess::send(2, body, routerId, 0, ifIndex, mod)
+
+Lưu ý về M-bit trong Exchange (Section 10.8):
+  - Master: gửi DD poll, M=1 nếu còn LSA, M=0 nếu hết
+  - Slave: response với M=1 nếu còn, M=0 nếu hết
+  - ExchangeDone: cần cả 2 chiều M=0
+    (Section 10.6: Master thấy ExchangeDone khi nó đã gửi hết
+     AND gói vừa accept có M=0; Slave thấy khi cả 2 chiều M=0)
+
+
+[Flow] databaseDescriptionData::processDD(hdr, data, iface, myRouterId)
+────────────────────────────────────────────────────────────────────────
+Xử lý DD packet nhận được. KHÔNG đụng timer — handleMessage lo.
+Trả về DdResult để handleMessage quyết định.
+
+│
+├── 0. Parse DD body + validate MTU (RFC A.3.3 + 10.6)
+│   ├── get16 → interfaceMTU
+│   │   └── [Check] MTU too large? → r.valid=false, return r
+│   │       (P2P: MTU=0 nên luôn pass, nhưng giữ đúng RFC)
+│   ├── get8  → options
+│   ├── get8  → flags (I, M, MS bits)
+│   ├── get32 → ddSeq
+│   └── [Loop] Phần còn lại của body → đọc các LSA header
+│       └── Mỗi 20 byte → 1 LSAHeader (age,options,type,linkStateId,
+│           advertisingRouter,sequenceNumber,checksum,length)
+│
+├── [Tree] nbr->state == ExStart:
+│   │   (Section 10.6 — Negotiation)
+│   │
+│   ├── [Case 1] Slave negotiation:
+│   │   ├── Kiểm tra: (flags & (I|M|MS)) == (I|M|MS)  ← I+M+MS=1
+│   │   ├── Kiểm tra: data.size == 8 (body rỗng, chỉ header DD không LSA)
+│   │   └── Kiểm tra: hdr.routerId > myRouterId
+│   │       │
+│   │       └── TRUE → Slave
+│   │           ├── nbr->isMaster = 0
+│   │           ├── nbr->ddSequenceNumber = ddSeq
+│   │           ├── nbr->lastDdOptions = options
+│   │           ├── nbr->lastDdIMs = flags
+│   │           ├── [QUAN TRỌNG] nbr->optionsNeighbor = options
+│   │           │   (RFC 10.6: record in Neighbor Options field)
+│   │           ├── r.negotiationDone = true
+│   │           ├── r.shouldSendDD = true (Slave reply)
+│   │           └── r.valid = true
+│   │
+│   ├── [Case 2] Master negotiation:
+│   │   ├── Kiểm tra: !(flags & I)  ← I=0
+│   │   ├── Kiểm tra: !(flags & MS) ← MS=0
+│   │   ├── Kiểm tra: ddSeq == nbr->ddSequenceNumber
+│   │   └── Kiểm tra: hdr.routerId < myRouterId
+│   │       │
+│   │       └── TRUE → Master
+│   │           ├── nbr->isMaster = 1 (giữ master)
+│   │           ├── nbr->lastDdOptions = options
+│   │           ├── nbr->lastDdIMs = flags
+│   │           ├── [QUAN TRỌNG] nbr->optionsNeighbor = options
+│   │           │   (RFC 10.6: record in Neighbor Options field)
+│   │           ├── r.negotiationDone = true
+│   │           ├── r.shouldSendDD = false (master không reply)
+│   │           └── r.valid = true
+│   │
+│   └── [Default] Neither:
+│       ├── r.valid = true (gói hợp lệ nhưng bị ignore)
+│       └── r.negotiationDone = false
+│
+├── [Tree] nbr->state == Exchange:
+│   │   (Section 10.6 — Master/Slave protocol)
+│   │
+│   ├── [Check] DUPLICATE?
+│   │   └── Nếu flags == lastDdIMs AND options == lastDdOptions
+│   │       AND ddSeq == last received DD seq:
+│   │       ⚠ Xem ghi chú ở Exchange tree view về gap field "last received DD seq"
+│   │       │
+│   │       ├── [Tree] nbr->isMaster?
+│   │       │   ├── Master: r.valid = true (discard duplicate)
+│   │       │   └── Slave: r.shouldSendDD = true (resend last DD)
+│   │       └── Return r (kết thúc xử lý cho duplicate)
+│   │
+│   ├── [Check] VALIDATION — nếu lỗi → SeqNumberMismatch
+│   │   │
+│   │   ├── [Tree] Inconsistent MS-bit?
+│   │   │   ├── (flags & MS) và isMaster không khớp
+│   │   │   │   (MS=1 mà self là slave, hoặc MS=0 mà self là master)
+│   │   │   └── → SeqNumberMismatch
+│   │   │
+│   │   ├── [Tree] I-bit == 1?
+│   │   │   └── → SeqNumberMismatch
+│   │   │
+│   │   └── [Tree] Options != optionsNeighbor? (RFC: Neighbor Options field)
+│   │       └── → SeqNumberMismatch
+│   │
+│   │   └── [SeqNumberMismatch handler]
+│   │       ├── r.valid = false (gói lỗi)
+│   │       ├── r.neighborStateChanged = true
+│   │       └── handleMessage sẽ: state = ExStart, xóa 3 list, restart
+│   │
+│   ├── [Check] SEQUENCE (Section 10.6)
+│   │   ├── [Tree] isMaster?
+│   │   │   ├── Master: ddSeq phải == nbr->ddSequenceNumber
+│   │   │   └── Slave: ddSeq phải == nbr->ddSequenceNumber + 1
+│   │   └── Không khớp → SeqNumberMismatch (như trên)
+│   │
+│   └── [Action] ACCEPT — gói hợp lệ, xử lý nội dung
+│       │
+│       ├── Ghi nhận gói cuối (cho duplicate detection lần sau):
+│       │   nbr->lastDdOptions = options
+│       │   nbr->lastDdIMs = flags
+│       │   ⚠ Cần lưu ddSeq của gói này làm "last received DD seq"
+│       │
+│       ├── [Loop] Với mỗi LSA header trong body DD:
+│       │   ├── Kiểm tra LS type hợp lệ (type 1-5, dự án chỉ type=1)
+│       │   │   └── Không hợp lệ → SeqNumberMismatch
+│       │   │
+│       │   ├── Tra LSDB: tìm LSA có (type, linkStateId, advertisingRouter)
+│       │   │
+│       │   │   [Tree] Chưa có? hoặc LSDB copy cũ hơn?
+│       │   │   (Section 13.1: so sánh sequenceNumber >, nếu bằng
+│       │   │    thì MaxAge first, nếu bằng thì age < MaxAgeDiff là mới hơn)
+│       │   │   │
+│       │   │   ├── YES: Thêm LSA header này vào linkStateRequestList
+│       │   │   │   (nếu chưa có — tránh duplicate request)
+│       │   │   │
+│       │   │   └── NO: Bỏ qua (LSDB đã có bản mới hơn hoặc bằng)
+│       │   │       └── [Note: dự án Router-LSA, LSDB đồng bộ ban đầu
+│       │   │           nên có thể tất cả LSA header từ DD đều đã có,
+│       │   │           dẫn đến linkStateRequestList rỗng → Full ngay]
+│       │
+│       ├── [Tree] isMaster?
+│       │   │
+│       │   ├── MASTER:
+│       │   │   ├── nbr->ddSequenceNumber++ (Section 10.6)
+│       │   │   ├── [Tree] Đã gửi hết databaseSummaryList?
+│       │   │   │   ├── YES AND (flags & DD_M) == 0 (M-bit=0)?
+│       │   │   │   │   ├── CÓ: r.exchangeDone = true
+│       │   │   │   │   └── KHÔNG: r.shouldSendDD = true (gửi DD mới)
+│       │   │   │   └── NO (còn LSA phải gửi):
+│       │   │   │       r.shouldSendDD = true (handleMessage sẽ gọi sendDD)
+│       │   │   └── r.valid = true
+│       │   │
+│       │   └── SLAVE:
+│       │       ├── nbr->ddSequenceNumber = ddSeq (Section 10.6 Slave)
+│       │       ├── r.shouldSendDD = true (Slave luôn phải response)
+│       │       ├── [Tree] (flags & DD_M) == 0 AND
+│       │       │   đã gửi hết databaseSummaryList của self?
+│       │       │   ├── CÓ: r.exchangeDone = true
+│       │       │   │   (Section 10.6: Slave thấy ExchangeDone trước Master
+│       │       │   │    "Note that the slave always generates this event
+│       │       │   │    before the master.")
+│       │       │   └── KHÔNG: tiếp tục Exchange
+│       │       └── r.valid = true
+│       │
+│       └── r.neighborStateChanged = (r.exchangeDone == true)
+│
+├── [Tree] nbr->state == Loading/Full:
+│   │   (Section 10.6 — chỉ xử lý duplicate)
+│   │
+│   ├── [Check] Options mismatch với optionsNeighbor? → SeqNumberMismatch
+│   ├── [Check] I-bit == 1? → SeqNumberMismatch
+│   │
+│   ├── [Tree] Là duplicate?
+│   │   ├── [Tree] isMaster?
+│   │   │   ├── Master: r.valid = true (discard)
+│   │   │   └── Slave: r.shouldSendDD = true (resend last DD)
+│   │   └── r.valid = true
+│   │
+│   └── Không duplicate:
+│       └── r.valid = false → SeqNumberMismatch
+│
+└── Return r
+
+===============================================================================
+LƯU Ý QUAN TRỌNG VỀ LOOP VÀ ĐIỀU KIỆN KẾT THÚC
+===============================================================================
+
+1. **Vòng lặp gửi DD (Master, Exchange state):**
+   - Master gửi DD poll → chờ Slave ACK (echo DD seq)
+   - Nếu Slave không ACK trong RxmtInterval → rxmtTimer cháy → retransmit
+   - Điều kiện kết thúc: Master đã gửi hết databaseSummaryList
+     VÀ nhận được DD từ Slave có M-bit = 0
+     → ExchangeDone
+
+2. **Vòng lặp Slave response:**
+   - Slave gửi DD mỗi khi nhận poll hợp lệ từ Master
+   - Điều kiện kết thúc: Slave đã gửi hết databaseSummaryList
+     VÀ gói nhận từ Master có M-bit = 0
+     → ExchangeDone (Slave thấy trước Master)
+
+3. **Retransmit loop (rxmtTimer):**
+   - ExStart: retransmit DD rỗng I+M+MS mỗi RxmtInterval
+   - Exchange (Master): retransmit DD cuối mỗi RxmtInterval
+   - Exchange (Slave): KHÔNG retransmit (chỉ response)
+   - Điều kiện kết thúc: state change ra khỏi ExStart/Exchange
+     → cancel rxmtTimer
+
+4. **SeqNumberMismatch recovery:**
+   - Gặp lỗi → restart từ ExStart
+   - xóa 3 list → ddSeq++ → isMaster=1 → gửi DD rỗng I+M+MS
+   - Điều kiện kết thúc loop lỗi: NegotiationDone → Exchange thành công
+     (Nếu lỗi liên tục → infinite loop về mặt lý thuyết,
+      trong thực tế P2P không có lỗi vì không có thay đổi Options giữa chừng)
+
+===============================================================================
+ĐẦU RA MONG ĐỢI SAU KHI 1b1 HOÀN TẤT
+===============================================================================
+
+1b1 có 2 mốc quan trọng:
+  - **Trong khi Exchange đang chạy** (DD packets đang trao đổi, chưa ExchangeDone):
+    neighbor.state == Exchange(5)
+  - **Sau khi ExchangeDone** (kết thúc trao đổi DD header):
+    neighbor.state == Loading(6) hoặc Full(7) tùy linkStateRequestList
+
+Bảng dưới mô tả trạng thái **SAU KHI ExchangeDone** (đầu ra cuối của 1b1):
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│              KẾT QUẢ 1b1 — ExStart + Exchange                           │
+├───────────────────────────────────┬──────────────────────────────────────┤
+│ Thành phần                        │ Giá trị                             │
+├───────────────────────────────────┼──────────────────────────────────────┤
+│ Interface.state                   │ PointToPoint (3) — không đổi         │
+│ Neighbor.state (sau ExchangeDone) │ Loading (6) hoặc Full (7)            │
+│                                   │ (Full nếu linkStateRequestList rỗng) │
+├───────────────────────────────────┼──────────────────────────────────────┤
+│ Neighbor.isMaster                 │ 1 (master) hoặc 0 (slave)            │
+│ Neighbor.ddSequenceNumber         │ Đã tăng từ giá trị ban đầu           │
+│ Neighbor.optionsNeighbor          │ Options ghi nhận từ ExStart         │
+│ Neighbor.lastDdOptions            │ Options từ DD cuối (duplicate check)│
+│ Neighbor.lastDdIMs                │ I+M+MS bits từ DD cuối              │
+├───────────────────────────────────┼──────────────────────────────────────┤
+│ Neighbor.databaseSummaryList      │ Toàn bộ LSA header từ LSDB self      │
+│                                   │ (có thể rỗng nếu ExchangeDone)       │
+│ Neighbor.linkStateRequestList     │ LSA cần kéo về từ neighbor           │
+│                                   │ → rỗng nếu không thiếu               │
+│                                   │ → có phần tử nếu LSDB thiếu          │
+│ Neighbor.linkStateRetransmissionList│ Rỗng (chưa dùng trong 1b1)        │
+├───────────────────────────────────┼──────────────────────────────────────┤
+│ rxmtTimer                         │ Đã cancel hoặc schedule mới          │
+│ inactivityTimer                   │ Đang chạy (không đổi so với 1a)     │
+├───────────────────────────────────┼──────────────────────────────────────┤
+│ LSDB (routerLSAs)                 │ CHƯA THAY ĐỔI — chỉ có Router-LSA   │
+│                                   │ của self (stub links)                │
+│ RoutingTable                      │ RỖNG (chưa SPF)                     │
+└───────────────────────────────────┴──────────────────────────────────────┘
+
+Ví dụ với mạng 4 router:
+         R1 ─── R2
+          \    /
+           R4
+           │
+           R6
+
+Sau Hello (1a), mỗi router có neighbor ở 2Way.
+Sau 1b1, tùy Router ID lớn/nhỏ, một bên làm master:
+
+  Trên cặp R1(1)-R2(2):
+    R1: isMaster=0 (slave, vì RouterID R2 > R1)
+    R2: isMaster=1 (master)
+    ddSequenceNumber: R1 dùng seq của R2, R2 tăng dần
+    Cả 2 biết nhau có LSA gì → linkStateRequestList ở mỗi bên
+
+  Trên cặp R1(1)-R4(4):
+    R1: isMaster=0, R4: isMaster=1
+
+  Trên cặp R2(2)-R4(4):
+    R4: isMaster=1, R2: isMaster=0
+
+  Trên cặp R4(4)-R6(6):
+    R4: isMaster=0 (slave, vì RouterID R6 > R4)
+    R6: isMaster=1 (master)
+
+Kết quả trên R4 (RouterID=4) sau 1b1:
+  - Có 3 adjacency đang Exchange với R1, R2, R6
+  - databaseSummaryList: copy LSA header của R4 (type=1, id=4, adv=4)
+    → gửi cho cả 3 neighbor
+  - linkStateRequestList mỗi neighbor:
+    - R4 vs R1: request LSA header của R1 (chưa có trong LSDB R4 trừ LSA self)
+      → linkStateRequestList của R1's neighbor = [LSA{type=1, id=1, adv=1}]
+    - R4 vs R2: request [LSA{type=1, id=2, adv=2}]
+    - R4 vs R6: request [LSA{type=1, id=6, adv=6}]
+
+Điều kiện để chuyển sang 1b2 (Loading):
+  - ExchangeDone event xảy ra
+  - linkStateRequestList KHÔNG rỗng → state = Loading
+  - Nếu linkStateRequestList rỗng (cả 2 bên có LSDB giống hệt) → state = Full
+
+Điều kiện để chuyển sang 1c (Originate + Flood):
+  - neighbor.state == Full (kết thúc 1b1 nếu không thiếu LSA,
+    hoặc sau 1b2 nếu thiếu)
