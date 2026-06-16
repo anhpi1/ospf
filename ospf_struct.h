@@ -327,6 +327,7 @@ struct LsuResult {
     bool scheduleSPF;          // true → schedule SPF
     bool badLSReq;             // true → BadLSReq (Section 13 step 6)
     std::vector<LSAHeader> ackHeaders;  // LSA headers cần ACK
+    std::vector<LSAHeader> newLsas;     // LSA headers mới cài vào LSDB (1c: flood tiếp)
 };
 
 class linkStateRequestData
@@ -368,6 +369,13 @@ class linkStateUpdateData
                                      InterfaceData* iface,
                                      AreaData& area,
                                      std::vector<LSAHeader>& requestList);
+
+        // Flood LSA ra tất cả interface (RFC 2328 Section 13.3)
+        // incomingIfIndex = -1 nếu self-originated (flood ra tất cả)
+        // incomingIfIndex >= 0 nếu nhận từ neighbor (không flood ngược lại)
+        static void floodLSA(const LSA& lsa, int incomingIfIndex,
+                              OspfRouterState& state, uint32_t routerId,
+                              omnetpp::cSimpleModule* mod);
 };
 
 //type 5

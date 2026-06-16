@@ -17,6 +17,7 @@ class routerOspf : public cSimpleModule
         OspfRouterState* state;
         uint32_t routerId;
         cMessage* helloTimer;
+        cMessage* spfTimer;      // SPF delay timer (Section 16)
     protected:
         virtual void initialize() override;
         virtual void handleMessage(cMessage *msg) override;

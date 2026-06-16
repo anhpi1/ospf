@@ -29,6 +29,8 @@ void routerOspf::initialize()
     helloTimer = new cMessage("helloTimer");
     scheduleAt(simTime() + state->interfaces[0].helloInterval, helloTimer);
 
+    spfTimer = nullptr;                     // SPF timer chưa dùng
+
     // Ghi state dump đầu tiên — trạng thái ngay sau Phase 0 (0.G)
     state->printState();
 }
@@ -44,6 +46,10 @@ void routerOspf::handleMessage(cMessage *msg)
                 helloData::sendHello(i, *state, routerId, this);
             }
             scheduleAt(simTime() + state->interfaces[0].helloInterval, msg);
+        } else if (msg == spfTimer) {
+            // 1c.F: spfTimer cháy → [TODO] SPF calculation (Giai đoạn 2a)
+            spfTimer = nullptr;
+            delete msg;
         } else {
             // Tìm timer nào đã cháy: inactivityTimer hoặc rxmtTimer
             bool found = false;
@@ -82,8 +88,40 @@ void routerOspf::handleMessage(cMessage *msg)
                             delete msg;
                             nbr->rxmtTimer = nullptr;
                         }
+                    } else if (nbr->state == NBR_FULL) {
+                        // 1c.C: Full — retransmit LSA từ linkStateRetransmissionList
+                        // RFC 2328 Section 13.6 (Retransmitting LSAs)
+                        if (!nbr->linkStateRetransmissionList.empty()) {
+                            // Tra LSDB → xây LSU → gửi (Section 13.6)
+                            std::vector<LSA> lsas;
+                            for (const auto& req : nbr->linkStateRetransmissionList) {
+                                for (const auto& lsa : state->area.routerLSAs) {
+                                    if (lsa.header.type == req.LSType
+                                        && lsa.header.linkStateId == req.linkStateId
+                                        && lsa.header.advertisingRouter == req.advertisingRouter)
+                                    {
+                                        LSA retransLsa = lsa;
+                                        // Tăng LS age InfTransDelay (Section 13.6 + 13.3(5))
+                                        int newAge = retransLsa.header.age + iface->infTransDelay;
+                                        if (newAge > 0xFFFF) newAge = 0xFFFF;
+                                        retransLsa.header.age = (uint16_t)newAge;
+                                        lsas.push_back(retransLsa);
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!lsas.empty())
+                                linkStateUpdateData::sendLSU(i, lsas, routerId,
+                                                              iface->areaID, this);
+                            scheduleAt(simTime() + iface->rxmtInterval, msg);
+                        } else {
+                            // List rỗng: cancel timer
+                            cancelEvent(msg);
+                            delete msg;
+                            nbr->rxmtTimer = nullptr;
+                        }
                     } else {
-                        // Other states (Exchange/Slave, Loading, Full): cancel
+                        // Other states: cancel
                         cancelEvent(msg);
                         delete msg;
                         nbr->rxmtTimer = nullptr;
@@ -217,9 +255,11 @@ void routerOspf::handleMessage(cMessage *msg)
 
         // --- ExchangeDone → Loading hoặc Full (Section 10.3) ---
         if (res.exchangeDone) {
-            if (nbr->linkStateRequestList.empty())
+            bool wasFull = false;
+            if (nbr->linkStateRequestList.empty()) {
                 nbr->state = NBR_FULL;
-            else
+                wasFull = true;
+            } else
                 nbr->state = NBR_LOADING;
             // Cancel rxmtTimer (không còn DD)
             if (nbr->rxmtTimer) {
@@ -230,6 +270,16 @@ void routerOspf::handleMessage(cMessage *msg)
             state->logTransition("1b1",
                 nbr->state == NBR_FULL ? "ExchangeDone→Full" : "ExchangeDone→Loading",
                 simTime().dbl(), ifIndex);
+            // 1c: ExchangeDone→Full → originate Router-LSA (Section 12.4 Event 4)
+            if (wasFull) {
+                state->originateRouterLSA();
+                for (auto& lsa : state->area.routerLSAs) {
+                    if (lsa.header.advertisingRouter == routerId) {
+                        linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
+                        break;
+                    }
+                }
+            }
             // Nếu vào Loading: gửi LSR đầu tiên + schedule rxmtTimer (1b2)
             if (nbr->state == NBR_LOADING) {
                 linkStateRequestData::sendLSR(ifIndex, *state, routerId, this);
@@ -338,6 +388,16 @@ void routerOspf::handleMessage(cMessage *msg)
                 delete nbr->rxmtTimer; nbr->rxmtTimer = nullptr;
             }
             state->logTransition("1b2", "LoadingDone→Full", simTime().dbl(), ifIndex);
+
+            // 1c: Neighbor đầu tiên Full → originate Router-LSA (Section 12.4 Event 4)
+            state->originateRouterLSA();
+            // Flood LSA mới ra tất cả neighbor
+            for (auto& lsa : state->area.routerLSAs) {
+                if (lsa.header.advertisingRouter == routerId) {
+                    linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
+                    break;
+                }
+            }
         }
         // Loading còn item → gửi LSR tiếp (Section 10.9)
         else if (nbr->state == NBR_LOADING && !nbr->linkStateRequestList.empty()) {
@@ -351,19 +411,90 @@ void routerOspf::handleMessage(cMessage *msg)
             scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
         }
 
+        // 1c: Flood LSA mới ra neighbor khác (Section 13.3 step (5b))
+        if (!lsuRes.newLsas.empty()) {
+            for (const auto& lsaHdr : lsuRes.newLsas) {
+                // Tra LSDB để lấy LSA đầy đủ
+                for (auto& lsa : state->area.routerLSAs) {
+                    if (lsa.header.type == lsaHdr.type
+                        && lsa.header.linkStateId == lsaHdr.linkStateId
+                        && lsa.header.advertisingRouter == lsaHdr.advertisingRouter)
+                    {
+                        linkStateUpdateData::floodLSA(lsa, ifIndex, *state, routerId, this);
+                        break;
+                    }
+                }
+            }
+        }
+
         // Schedule SPF nếu có LSA mới (Section 13.2)
         if (lsuRes.scheduleSPF) {
-            // [TODO] 1c: schedule SPF calculation
+            if (!spfTimer) {
+                spfTimer = new cMessage("spfTimer");
+                scheduleAt(simTime() + iface->infTransDelay, spfTimer);
+                state->logTransition("1c", "ScheduleSPF", simTime().dbl(), ifIndex);
+            }
         }
     }
 
     // ============================================================
-    // 1b2: Link State Acknowledgment (type=5)
-    // Trong Loading: bỏ qua (Section 10.7: không đặt LSU vào
-    // retransmission list → không cần ACK tracking)
+    // 1c.B: Link State Acknowledgment (type=5)
+    // RFC 2328 Section 13.7 (Receiving link state acknowledgments)
     // ============================================================
     else if (pktType == 5) {
-        // ignore — delete msg bên dưới
+        NeighborData* nbr = iface->neighbor;
+
+        // Pre-check: neighbor >= Exchange? (Section 13.7)
+        if (nbr->state < NBR_EXCHANGE) {
+            delete msg; return;
+        }
+
+        // Parse LSAck body: list of LSA headers (Section A.3.6)
+        int remain = (int)data.size();
+        if (remain > 0 && remain % 20 == 0) {
+            int off = 0;
+            int nAcks = remain / 20;
+            bool listChanged = false;
+
+            for (int i = 0; i < nAcks; i++) {
+                LSAHeader ackHdr;
+                ackHdr.age              = (uint16_t)((data[off] << 8) | data[off+1]); off += 2;
+                ackHdr.options          = data[off++];
+                ackHdr.type             = data[off++];
+                ackHdr.linkStateId      = (uint32_t)(data[off] << 24) | (data[off+1] << 16)
+                                        | (data[off+2] << 8) | data[off+3]; off += 4;
+                ackHdr.advertisingRouter = (uint32_t)(data[off] << 24) | (data[off+1] << 16)
+                                        | (data[off+2] << 8) | data[off+3]; off += 4;
+                ackHdr.sequenceNumber   = (int32_t)((uint32_t)(data[off] << 24) | (data[off+1] << 16)
+                                                  | (data[off+2] << 8) | data[off+3]); off += 4;
+                ackHdr.checksum         = (uint16_t)((data[off] << 8) | data[off+1]); off += 2;
+                ackHdr.length           = (uint16_t)((data[off] << 8) | data[off+1]); off += 2;
+
+                // Tìm trong linkStateRetransmissionList (Section 13.7)
+                for (auto it = nbr->linkStateRetransmissionList.begin();
+                     it != nbr->linkStateRetransmissionList.end(); ++it)
+                {
+                    if (it->LSType == ackHdr.type
+                        && it->linkStateId == ackHdr.linkStateId
+                        && it->advertisingRouter == ackHdr.advertisingRouter)
+                    {
+                        // Cùng instance? (so sánh sequenceNumber)
+                        // Lưu ý: linkStateRetransmissionList là LSARequest (ko có seq)
+                        // Nên chấp nhận mọi ACK cho LSA này (Section 13.7 đơn giản hóa)
+                        nbr->linkStateRetransmissionList.erase(it);
+                        listChanged = true;
+                        break;
+                    }
+                }
+            }
+
+            // Nếu list rỗng → cancel rxmtTimer (Section 13.6)
+            if (listChanged && nbr->linkStateRetransmissionList.empty() && nbr->rxmtTimer) {
+                cancelEvent(nbr->rxmtTimer);
+                delete nbr->rxmtTimer;
+                nbr->rxmtTimer = nullptr;
+            }
+        }
     }
 
     delete msg;
@@ -373,6 +504,10 @@ void routerOspf::handleMessage(cMessage *msg)
 void routerOspf::finish()
 {
     cancelAndDelete(helloTimer);
+    if (spfTimer) {
+        cancelAndDelete(spfTimer);
+        spfTimer = nullptr;
+    }
     for (auto& iface : state->interfaces) {
         NeighborData* nbr = iface.neighbor;
         if (nbr) {

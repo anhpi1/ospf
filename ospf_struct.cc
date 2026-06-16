@@ -61,58 +61,113 @@ OspfRouterState::~OspfRouterState()
 
 void OspfRouterState::originateRouterLSA()
 {
+    // Tìm instance cũ trong LSDB để lấy sequenceNumber + so sánh nội dung
+    LSA* oldLsa = nullptr;
+    for (auto& lsa : area.routerLSAs) {
+        if (lsa.header.advertisingRouter == routerID) {
+            oldLsa = &lsa;
+            break;
+        }
+    }
+
     // Tạo Router-LSA mới (Section 12.4.1, RFC 2328)
     LSA lsa;
 
     // LSA Header (Section 12.1 + A.4.1)
     lsa.header.age = 0;
-    lsa.header.options = OPT_E;                     // ExternalRoutingCapability
-    lsa.header.type = 1;                             // Router-LSA
+    lsa.header.options = OPT_E;
+    lsa.header.type = 1;                                    // Router-LSA
     lsa.header.linkStateId = routerID;
     lsa.header.advertisingRouter = routerID;
-    lsa.header.sequenceNumber = 0x80000001;          // InitialSequenceNumber (Section 12.1.6)
-    lsa.header.checksum = 0;                         // dự án bỏ qua checksum
+    lsa.header.checksum = 0;
 
-    // Router-LSA flags (A.4.2): V=0 (không virtual link), E=0 (không ASBR), B=0 (không ABR)
+    // Router-LSA flags: V=0 (no virtual link), E=0 (no ASBR), B=0 (no ABR)
     lsa.flags = 0;
     lsa.zero = 0;
     lsa.numLinks = 0;
     lsa.links.clear();
 
-    // [Loop] Xây links[] — mỗi interface PointToPoint → 1 Type 3 stub (Section 12.4.1)
+    // Xây links[] — duyệt từng interface (Section 12.4.1)
     for (size_t i = 0; i < interfaces.size(); i++) {
         InterfaceData* iface = &interfaces[i];
 
-        // Down → bỏ qua (Section 12.4.1: "If state is Down, no links added")
+        // Down → bỏ qua (Section 12.4.1)
         if (iface->state == IF_DOWN)
             continue;
 
-        // P2P: thêm Type 3 stub link (Section 12.4.1.1 — thêm luôn, bất kể neighbor state)
-        // neighbor chưa Full → không thêm Type 1, chỉ thêm stub
-        LSALink link;
-        link.linkID = 0;                              // chưa biết neighbor IP ở Phase 0
-        link.linkData = 0xFFFFFFFF;                    // host route (Section 12.4.1.1 Option 1)
-        link.type = LINK_STUB;                         // Type 3 (stub network)
-        link.numTOS = 0;
-        link.metric = iface->cost;                     // interface's configured output cost
-        link.Data.clear();
+        // Loopback → Type 3 stub với host route đến chính mình (Section 12.4.1)
+        if (iface->state == IF_LOOPBACK) {
+            LSALink link;
+            link.linkID = iface->ipAddress;                  // self IP
+            link.linkData = 0xFFFFFFFF;                      // mask /32
+            link.type = LINK_STUB;
+            link.numTOS = 0;
+            link.metric = 0;
+            link.Data.clear();
+            lsa.links.push_back(link);
+            lsa.numLinks++;
+            continue;
+        }
 
-        lsa.links.push_back(link);
-        lsa.numLinks++;
-    }
+        // PointToPoint (Section 12.4.1.1)
+        if (iface->state == IF_POINTTOPOINT) {
+            NeighborData* nbr = iface->neighbor;
 
-    // Tính tổng length: 20 byte header + 4 byte (flags+zero+numLinks) + numLinks * 12 byte (A.4.2)
-    lsa.header.length = 24 + lsa.numLinks * 12;
+            // --- Type 3 stub link (luôn thêm, bất kể neighbor state) ---
+            LSALink stub;
+            // Option 1: LinkID = neighbor's IP / Router ID, LinkData = 0xFFFFFFFF
+            if (nbr && nbr->IDNeighbor != 0)
+                stub.linkID = nbr->IPNeighbor ? nbr->IPNeighbor : nbr->IDNeighbor;
+            else
+                stub.linkID = 0;                              // chưa biết neighbor
+            stub.linkData = 0xFFFFFFFF;                       // host route
+            stub.type = LINK_STUB;
+            stub.numTOS = 0;
+            stub.metric = iface->cost;
+            stub.Data.clear();
+            lsa.links.push_back(stub);
+            lsa.numLinks++;
 
-    // Thay thế LSA cũ trong LSDB hoặc thêm mới (Section 12.4)
-    for (size_t i = 0; i < area.routerLSAs.size(); i++) {
-        if (area.routerLSAs[i].header.advertisingRouter == routerID) {
-            area.routerLSAs[i] = lsa;
-            return;  // đã thay thế xong
+            // --- Type 1 P2P link (chỉ khi neighbor Full, Section 12.4.1.1) ---
+            if (nbr && nbr->state == NBR_FULL) {
+                LSALink p2p;
+                p2p.linkID = nbr->IDNeighbor;                  // Router ID của neighbor
+                p2p.linkData = iface->ipAddress;               // IP interface (hoặc ifIndex)
+                p2p.type = LINK_P2P;
+                p2p.numTOS = 0;
+                p2p.metric = iface->cost;
+                p2p.Data.clear();
+                lsa.links.push_back(p2p);
+                lsa.numLinks++;
+            }
         }
     }
-    // Chưa có → thêm mới
-    area.routerLSAs.push_back(lsa);
+
+    // Tính length: 20 byte header + 4 byte (flags+zero+numLinks) + numLinks * 12 byte
+    lsa.header.length = 24 + lsa.numLinks * 12;
+
+    // Section 12.4: "originate if and only if contents would be different"
+    if (oldLsa) {
+        // So sánh nội dung với LSA cũ — nếu giống hệt, không tạo mới
+        bool same = (oldLsa->numLinks == lsa.numLinks);
+        if (same) {
+            for (uint16_t j = 0; j < lsa.numLinks && same; j++)
+                same = (oldLsa->links[j].type == lsa.links[j].type
+                     && oldLsa->links[j].linkID == lsa.links[j].linkID
+                     && oldLsa->links[j].linkData == lsa.links[j].linkData
+                     && oldLsa->links[j].metric == lsa.links[j].metric);
+        }
+        if (same)
+            return;  // nội dung không đổi → không originate (Section 12.4)
+
+        // Nội dung thay đổi → increment sequenceNumber
+        lsa.header.sequenceNumber = oldLsa->header.sequenceNumber + 1;
+        *oldLsa = lsa;  // replace
+    } else {
+        // Lần đầu tiên: InitialSequenceNumber (Section 12.1.6)
+        lsa.header.sequenceNumber = 0x80000001;
+        area.routerLSAs.push_back(lsa);
+    }
 }
 
 static const char* nbrStateName(int s) {
@@ -216,7 +271,29 @@ void OspfRouterState::printState()
     for (int idx : area.interfaceIndices) f << idx << " ";
     f << "\n";
     f << "  LSDB: " << area.routerLSAs.size() << " Router-LSAs\n";
+    for (const auto& lsa : area.routerLSAs) {
+        f << "    [LSA] adv=" << lsa.header.advertisingRouter
+          << " seq=0x" << std::hex << (uint32_t)lsa.header.sequenceNumber << std::dec
+          << " age=" << lsa.header.age
+          << " links=" << lsa.numLinks << "\n";
+        for (const auto& link : lsa.links) {
+            const char* lt = "?";
+            if (link.type == 1) lt = "P2P";
+            else if (link.type == 3) lt = "Stub";
+            f << "      [" << lt << "] id=0x" << std::hex << link.linkID << std::dec
+              << " data=0x" << std::hex << link.linkData << std::dec
+              << " metric=" << link.metric << "\n";
+        }
+    }
     f << "  SPF vertices: " << area.spfVertices.size() << " entries\n";
+    for (const auto& v : area.spfVertices) {
+        f << "    [V] id=0x" << std::hex << v.vertexId << std::dec
+          << " dist=" << v.distance << " nextHop=" << v.nextHop
+          << " parent=";
+        if (v.parent) f << "0x" << std::hex << v.parent->vertexId << std::dec;
+        else f << "null";
+        f << " nbrs=" << v.neighbors.size() << "\n";
+    }
 
     f << "\n--- Routing Table (" << RoutingTable.size() << ") ---\n";
     for (size_t i = 0; i < RoutingTable.size(); i++) {
@@ -1050,11 +1127,12 @@ LsuResult linkStateUpdateData::processLSU(const headerOspf& hdr,
                 // (5) received newer?
                 if (isNewerLSA(recvLsa.header, dbLsa.header)) {
                     // (5a) MinLSArrival — bỏ qua
-                    // (5b) Flood — placeholder (1c)
+                    // (5b) Flood — 1c: handleMessage sẽ gọi floodLSA dùng newLsas
                     // (5c) Xóa DB copy cũ khỏi retransmission lists
                     // (5d) Install: replace DB copy
                     dbLsa = recvLsa;
                     r.scheduleSPF = true;
+                    r.newLsas.push_back(recvLsa.header);   // đánh dấu cần flood
                     // (5e) ACK
                     r.ackHeaders.push_back(recvLsa.header);
                     // Loading specific: xóa khỏi linkStateRequestList nếu có
@@ -1100,6 +1178,7 @@ LsuResult linkStateUpdateData::processLSU(const headerOspf& hdr,
             // (5) Install new LSA into LSDB
             area.routerLSAs.push_back(recvLsa);
             r.scheduleSPF = true;
+            r.newLsas.push_back(recvLsa.header);   // đánh dấu cần flood
             // (5e) ACK
             r.ackHeaders.push_back(recvLsa.header);
             // Loading specific: xóa khỏi request list
@@ -1120,6 +1199,121 @@ LsuResult linkStateUpdateData::processLSU(const headerOspf& hdr,
     r.loadingDone = requestList.empty();
     r.valid = true;
     return r;
+}
+
+
+// ============================================================
+// linkStateUpdateData::floodLSA
+// RFC 2328 Section 13.3 — Next step in the flooding procedure
+// ============================================================
+
+void linkStateUpdateData::floodLSA(const LSA& lsa, int incomingIfIndex,
+                                    OspfRouterState& state, uint32_t routerId,
+                                    omnetpp::cSimpleModule* mod)
+{
+    // Duyệt từng interface trong area (Section 13.3)
+    for (size_t i = 0; i < state.interfaces.size(); i++) {
+        InterfaceData* iface = &state.interfaces[i];
+        NeighborData* nbr = iface->neighbor;
+        if (!nbr) continue;
+
+        // (1) Kiểm tra neighbor có tham gia flooding không (Section 13.3 (1))
+        bool addToRetrans = false;
+
+        // (a) Neighbor state < Exchange → không tham gia flooding
+        if (nbr->state < NBR_EXCHANGE) {
+            // skip — không thêm vào retransmission list
+        }
+        else {
+            // (b) Neighbor state == Exchange/Loading → kiểm tra request list
+            if (nbr->state == NBR_EXCHANGE || nbr->state == NBR_LOADING) {
+                bool foundInRequestList = false;
+                // Tìm LSA trong request list của neighbor
+                for (auto it = nbr->linkStateRequestList.begin();
+                     it != nbr->linkStateRequestList.end(); )
+                {
+                    if (it->type == lsa.header.type
+                        && it->linkStateId == lsa.header.linkStateId
+                        && it->advertisingRouter == lsa.header.advertisingRouter)
+                    {
+                        foundInRequestList = true;
+                        // LSA có trong request list — so sánh
+                        if (lsa.header.sequenceNumber > it->sequenceNumber) {
+                            // LSA mới hơn: xóa khỏi request list, flood tiếp
+                            it = nbr->linkStateRequestList.erase(it);
+                            addToRetrans = true;
+                        } else if (lsa.header.sequenceNumber == it->sequenceNumber) {
+                            // Cùng instance: xóa khỏi request list (đã có rồi)
+                            it = nbr->linkStateRequestList.erase(it);
+                            // Không flood — neighbor đã biết LSA này
+                        } else {
+                            // LSA cũ hơn: neighbor có bản mới hơn, bỏ qua
+                            addToRetrans = false;
+                            it = nbr->linkStateRequestList.erase(it);
+                        }
+                        break;
+                    } else {
+                        ++it;
+                    }
+                }
+                // Section 13.3(1)(b): nếu LSA không có trong request list
+                // → neighbor chưa biết → cần flood
+                if (!foundInRequestList)
+                    addToRetrans = true;
+            } else {
+                // Neighbor state == Full → luôn thêm vào retransmission list
+                addToRetrans = true;
+            }
+
+            // (c) Không flood ngược lại interface đã nhận (Section 13.3 (1)(c))
+            if ((int)i == incomingIfIndex)
+                addToRetrans = false;
+
+            // (d) Thêm LSA vào linkStateRetransmissionList (Section 13.3 (1)(d))
+            if (addToRetrans) {
+                // Kiểm tra xem LSA đã có trong list chưa (tránh duplicate)
+                bool already = false;
+                for (const auto& req : nbr->linkStateRetransmissionList) {
+                    if (req.LSType == lsa.header.type
+                        && req.linkStateId == lsa.header.linkStateId
+                        && req.advertisingRouter == lsa.header.advertisingRouter)
+                    {
+                        already = true;
+                        break;
+                    }
+                }
+                if (!already) {
+                    LSARequest req;
+                    req.LSType = lsa.header.type;
+                    req.linkStateId = lsa.header.linkStateId;
+                    req.advertisingRouter = lsa.header.advertisingRouter;
+                    nbr->linkStateRetransmissionList.push_back(req);
+                }
+            }
+        }
+
+        // (2) Nếu không có neighbor nào được thêm → không flood ra interface này
+        if (!addToRetrans)
+            continue;
+
+        // (3)-(4) P2P không có DR/BDR → skip (Section 13.3 (3) và (4))
+
+        // (5) CẦN FLOOD — gửi LSU ra interface này (Section 13.3 (5))
+        LSA floodLsa = lsa;
+        // Tăng LS age thêm InfTransDelay (Section 13.3 (5))
+        int newAge = floodLsa.header.age + iface->infTransDelay;
+        if (newAge > 0xFFFF) newAge = 0xFFFF;   // MaxAge = 0xFFFF
+        floodLsa.header.age = (uint16_t)newAge;
+
+        std::vector<LSA> lsas = {floodLsa};
+        sendLSU((int)i, lsas, routerId, iface->areaID, mod);
+
+        // Schedule rxmtTimer nếu chưa chạy
+        if (!nbr->rxmtTimer) {
+            nbr->rxmtTimer = new cMessage("rxmtTimer");
+            mod->scheduleAt(omnetpp::simTime() + iface->rxmtInterval, nbr->rxmtTimer);
+        }
+    }
 }
 
 
