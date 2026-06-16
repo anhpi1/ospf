@@ -63,7 +63,7 @@ void routerOspf::handleMessage(cMessage *msg)
                     break;
                 }
                 if (nbr && nbr->rxmtTimer == msg) {
-                    // rxmtTimer cháy → retransmit DD (Section 10.8)
+                    // rxmtTimer cháy → retransmit (Section 10.8 / 10.9)
                     if (nbr->state == NBR_EXSTART) {
                         // ExStart: master retransmit DD rỗng I+M+MS
                         databaseDescriptionData::sendDD(i, *state, routerId, this);
@@ -72,6 +72,16 @@ void routerOspf::handleMessage(cMessage *msg)
                         // Exchange (Master): retransmit DD cuối
                         databaseDescriptionData::sendDD(i, *state, routerId, this);
                         scheduleAt(simTime() + iface->rxmtInterval, msg);
+                    } else if (nbr->state == NBR_LOADING) {
+                        // Loading: retransmit LSR (Section 10.9)
+                        if (!nbr->linkStateRequestList.empty()) {
+                            linkStateRequestData::sendLSR(i, *state, routerId, this);
+                            scheduleAt(simTime() + iface->rxmtInterval, msg);
+                        } else {
+                            cancelEvent(msg);
+                            delete msg;
+                            nbr->rxmtTimer = nullptr;
+                        }
                     } else {
                         // Other states (Exchange/Slave, Loading, Full): cancel
                         cancelEvent(msg);
@@ -220,12 +230,140 @@ void routerOspf::handleMessage(cMessage *msg)
             state->logTransition("1b1",
                 nbr->state == NBR_FULL ? "ExchangeDone→Full" : "ExchangeDone→Loading",
                 simTime().dbl(), ifIndex);
+            // Nếu vào Loading: gửi LSR đầu tiên + schedule rxmtTimer (1b2)
+            if (nbr->state == NBR_LOADING) {
+                linkStateRequestData::sendLSR(ifIndex, *state, routerId, this);
+                nbr->rxmtTimer = new cMessage("rxmtTimer");
+                scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
+            }
         }
 
         // --- Slave response hoặc Master poll tiếp theo ---
         if (res.shouldSendDD) {
             databaseDescriptionData::sendDD(ifIndex, *state, routerId, this);
         }
+    }
+
+    // ============================================================
+    // 1b2: Link State Request (type=3)
+    // RFC 2328 Section 10.7 — Receiving Link State Request packets
+    // ============================================================
+    else if (pktType == 3) {
+        NeighborData* nbr = iface->neighbor;
+        if (nbr->state < NBR_EXCHANGE) {
+            delete msg; return;  // ignore (Section 10.7)
+        }
+
+        LsrResult lsrRes = linkStateRequestData::processLSR(hdr, data, iface,
+                                                             state->area.routerLSAs);
+
+        if (lsrRes.badLSReq) {
+            // BadLSReq → ExStart (Section 10.7 + 10.3)
+            int oldState = nbr->state;
+            if (oldState >= NBR_EXSTART) {
+                nbr->state = NBR_EXSTART;
+                nbr->databaseSummaryList.clear();
+                nbr->linkStateRequestList.clear();
+                nbr->linkStateRetransmissionList.clear();
+                nbr->ddSequenceNumber++;
+                nbr->isMaster = 1;
+                if (nbr->rxmtTimer) {
+                    cancelEvent(nbr->rxmtTimer);
+                    delete nbr->rxmtTimer;
+                    nbr->rxmtTimer = nullptr;
+                }
+                nbr->lastDdIMs = DD_I | DD_M | DD_MS;
+                nbr->lastDdOptions = OPT_E;
+                databaseDescriptionData::sendDD(ifIndex, *state, routerId, this);
+                nbr->rxmtTimer = new cMessage("rxmtTimer");
+                scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
+                state->logTransition("1b2", "BadLSReq→ExStart", simTime().dbl(), ifIndex);
+            }
+        } else if (lsrRes.valid && !lsrRes.lsus.empty()) {
+            // Gửi LSU response (Section 10.7)
+            linkStateUpdateData::sendLSU(ifIndex, lsrRes.lsus,
+                                          routerId, iface->areaID, this);
+        }
+    }
+
+    // ============================================================
+    // 1b2: Link State Update (type=4)
+    // RFC 2328 Section 13 (Flooding Procedure)
+    // ============================================================
+    else if (pktType == 4) {
+        NeighborData* nbr = iface->neighbor;
+        if (nbr->state < NBR_EXCHANGE) {
+            delete msg; return;  // drop (Section 13)
+        }
+
+        // processLSU: validate LSA → so sánh LSDB → cài / ACK / discard
+        // Truncate linkStateRequestList cho các LSA response
+        LsuResult lsuRes = linkStateUpdateData::processLSU(
+            hdr, data, iface, state->area, nbr->linkStateRequestList);
+
+        if (lsuRes.badLSReq) {
+            // Section 13 (6): BadLSReq
+            if (nbr->state >= NBR_EXSTART) {
+                nbr->state = NBR_EXSTART;
+                nbr->databaseSummaryList.clear();
+                nbr->linkStateRequestList.clear();
+                nbr->linkStateRetransmissionList.clear();
+                nbr->ddSequenceNumber++;
+                nbr->isMaster = 1;
+                if (nbr->rxmtTimer) {
+                    cancelEvent(nbr->rxmtTimer);
+                    delete nbr->rxmtTimer; nbr->rxmtTimer = nullptr;
+                }
+                nbr->lastDdIMs = DD_I | DD_M | DD_MS;
+                nbr->lastDdOptions = OPT_E;
+                databaseDescriptionData::sendDD(ifIndex, *state, routerId, this);
+                nbr->rxmtTimer = new cMessage("rxmtTimer");
+                scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
+                state->logTransition("1b2", "BadLSReq(LSU)→ExStart",
+                                     simTime().dbl(), ifIndex);
+            }
+        }
+
+        // Gửi LSAck (Section 13 (5e) / (7b))
+        if (!lsuRes.ackHeaders.empty()) {
+            linkStateAcknowledgementData::sendLSAck(ifIndex, lsuRes.ackHeaders,
+                                                     routerId, iface->areaID, this);
+        }
+
+        // LoadingDone? (Section 10.3)
+        if (nbr->state == NBR_LOADING && lsuRes.loadingDone) {
+            nbr->state = NBR_FULL;
+            if (nbr->rxmtTimer) {
+                cancelEvent(nbr->rxmtTimer);
+                delete nbr->rxmtTimer; nbr->rxmtTimer = nullptr;
+            }
+            state->logTransition("1b2", "LoadingDone→Full", simTime().dbl(), ifIndex);
+        }
+        // Loading còn item → gửi LSR tiếp (Section 10.9)
+        else if (nbr->state == NBR_LOADING && !nbr->linkStateRequestList.empty()) {
+            linkStateRequestData::sendLSR(ifIndex, *state, routerId, this);
+            // Reset rxmtTimer (cancel cũ + schedule mới)
+            if (nbr->rxmtTimer) {
+                cancelEvent(nbr->rxmtTimer);
+                delete nbr->rxmtTimer; nbr->rxmtTimer = nullptr;
+            }
+            nbr->rxmtTimer = new cMessage("rxmtTimer");
+            scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
+        }
+
+        // Schedule SPF nếu có LSA mới (Section 13.2)
+        if (lsuRes.scheduleSPF) {
+            // [TODO] 1c: schedule SPF calculation
+        }
+    }
+
+    // ============================================================
+    // 1b2: Link State Acknowledgment (type=5)
+    // Trong Loading: bỏ qua (Section 10.7: không đặt LSU vào
+    // retransmission list → không cần ACK tracking)
+    // ============================================================
+    else if (pktType == 5) {
+        // ignore — delete msg bên dưới
     }
 
     delete msg;

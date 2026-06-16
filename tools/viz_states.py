@@ -27,6 +27,8 @@ RE_HEADER   = re.compile(r'Router ID:\s*(\d+)\s+ifIndex=(\d+)')
 RE_IFSTATE  = re.compile(r'\[\d+\]\s+type=\d+\s+state=(\S+)')
 RE_NBRSTATE = re.compile(r'nbr:\s*id=(\d+)\s+state=(\S+)')
 RE_DBLIST   = re.compile(r'(databaseSummaryList|linkStateRequestList|linkStateRetransmissionList)\s*\((\d+)\)')
+RE_LSDB     = re.compile(r'LSDB:\s*(\d+)\s+Router')
+RE_RTABLE   = re.compile(r'RoutingTable:\s*(\d+)\s+entries')
 
 
 def parse_events(base, subphases=None):
@@ -48,6 +50,7 @@ def parse_events(base, subphases=None):
                 text = f.read()
 
             time = ev = router = ev_ifIdx = None
+            router_data = {}  # per-router: lsdb, rt
             interfaces = {}
             current_idx = -1
 
@@ -86,6 +89,15 @@ def parse_events(base, subphases=None):
                         interfaces[current_idx]['lr'] = val
                     elif 'linkStateRetransmission' in m.group(1):
                         interfaces[current_idx]['rt'] = val
+                    continue
+                m = RE_LSDB.search(line)
+                if m and router is not None:
+                    router_data['lsdb'] = int(m.group(1))
+                    continue
+                m = RE_RTABLE.search(line)
+                if m and router is not None:
+                    router_data['rtable'] = int(m.group(1))
+                    continue
 
             if time is None or router is None or ev_ifIdx is None:
                 continue
@@ -95,7 +107,8 @@ def parse_events(base, subphases=None):
                 idata = interfaces[ev_ifIdx]
                 changed[(router, ev_ifIdx)] = (
                     idata['ifState'], idata['nbrState'], idata['nid'],
-                    idata['db'], idata['lr'], idata['rt']
+                    idata['db'], idata['lr'], idata['rt'],
+                    router_data.get('lsdb', 0), router_data.get('rtable', 0)
                 )
 
             seq_num = int(fn.split("_")[0])
@@ -107,36 +120,43 @@ def parse_events(base, subphases=None):
 
 def build_timelines(events_global):
     current = {}
+    router_current = {}  # per-router: lsdb, rtable
     timelines = defaultdict(list)
+    router_timelines = defaultdict(list)
 
+    # Thu thập tất cả router ID xuất hiện
+    all_rids = set()
     for _, _, _, router, ev_ifIdx, changed, _sub, _sq in events_global:
-        for key in changed:
-            if key not in current:
-                current[key] = ('Down', 'Down', 0, 0, 0, 0)
+        all_rids.add(router)
+        for (r, i) in changed:
+            all_rids.add(r)
+            if (r, i) not in current:
+                current[(r, i)] = ('Down', 'Down', 0, 0, 0, 0, 0, 0)
+
+    # Khởi tạo router_current = 0 cho tất cả router
+    for rid in all_rids:
+        router_current[rid] = (0, 0)
 
     for seq, (time, fn, ev_name, router, ev_ifIdx, changed, _sub, _sq) in enumerate(events_global):
         key = (router, ev_ifIdx)
         if key in changed:
             current[key] = changed[key]
-        ifState, nbrState, nbrId, db, lr, rt = current[key]
-        timelines[key].append((seq, ifState, nbrState, ev_name, time, nbrId, db, lr, rt))
+        ifState, nbrState, nbrId, db, lr, rt, lsdb, rtable = current[key]
+        timelines[key].append((seq, ifState, nbrState, ev_name, time, nbrId, db, lr, rt, lsdb, rtable))
+        # Cập nhật router data nếu event có dữ liệu
+        if lsdb > 0 or rtable > 0:
+            router_current[router] = (lsdb, rtable)
+        # Snapshot tất cả router tại seq này
+        for rid in sorted(router_current.keys()):
+            router_timelines[rid].append((seq, router_current[rid][0], router_current[rid][1]))
 
-    return timelines
+    return timelines, router_timelines
 
 
 # ─── build chart ────────────────────────────────────────────────
 COLORS = qualitative.Plotly * 3
 
-def build_figure(timelines, total_events):
-    # Tính max data usage toàn cục
-    all_totals = []
-    for pts in timelines.values():
-        for _, _, _, _, _, _, db, lr, rt in pts:
-            all_totals.append(lr)        # chỉ tính lr
-    global_max = max(all_totals) if all_totals else 1
-    if global_max == 0:
-        global_max = 1
-
+def build_figure(timelines, router_timelines, total_events):
     fig = go.Figure()
     color_idx = 0
 
@@ -147,10 +167,19 @@ def build_figure(timelines, total_events):
         nbrIds  = [p[5] for p in pts]
         nbr_hover = []
         for s, p in enumerate(pts):
-            totals = p[7]  # lr
             nbr_hover.append(
-                f'#{s} t={p[4]:.0f}s | {p[2]} ({p[3]})<br>'
-                f'db={p[6]} lr={p[7]} rt={p[8]} total={totals}'
+                f'<b>Event #{s}</b>  t={p[4]:.0f}s<br>'
+                f'<b>R{rid} IF{idx}</b>→R{p[5] if p[5] else "?"}<br>'
+                f'──── State ────<br>'
+                f'Interface: {p[1]}<br>'
+                f'Neighbor:  <b>{p[2]}</b> ({p[3]})<br>'
+                f'──── Per-IF Data ────<br>'
+                f'DB Summary List:       {p[6]} items<br>'
+                f'LinkStateReq List:     <b>{p[7]}</b> items<br>'
+                f'LinkStateRetr List:    {p[8]} items<br>'
+                f'──── Router Data ────<br>'
+                f'LSDB (Router-LSAs):    <b>{p[9]}</b><br>'
+                f'RoutingTable entries:  {p[10]}'
             )
 
         final_nbr = next((n for n in reversed(nbrIds) if n != 0), 0)
@@ -171,45 +200,60 @@ def build_figure(timelines, total_events):
         ))
         color_idx += 1
 
-    # === Data lines: 1 tổng / router (dashed) ===
-    # Chỉ tính linkStateRequestList (số LSA cần fetch) — dbSummary và retrans
-    # là temporary, không phản ánh dữ liệu thực tế cần xử lý.
+    # === Data lines: 1 đường / router, hover chi tiết từng thành phần ===
     by_router = defaultdict(list)
     for (rid, idx), pts in timelines.items():
         by_router[rid].append((idx, pts))
 
     for rid in sorted(by_router.keys()):
         items = by_router[rid]
-        # Tính tổng linkStateRequestList tại mỗi event seq
-        agg = []
+        # Build aggregated data per event
+        agg_all = []
         for seq in range(total_events):
-            total = 0
-            for _, pts in items:
-                # Dùng MAX lr: lr chỉ tăng, không giảm
-                lr_val = 0
+            total_db = total_lr = total_rtr = 0
+            detail_if = []
+            for ifIdx, pts in items:
+                db_v = lr_v = rtr_v = 0
                 for p in pts:
-                    if p[0] > seq:
-                        break
-                    if p[7] > lr_val:
-                        lr_val = p[7]
-                total += lr_val
-            agg.append(total)
-        pcts = agg[:]
+                    if p[0] > seq: break
+                    db_v = p[6]; lr_v = p[7]; rtr_v = p[8]
+                total_db += db_v; total_lr += lr_v; total_rtr += rtr_v
+                if db_v or lr_v or rtr_v:
+                    detail_if.append(f'IF{ifIdx}: db={db_v} lr={lr_v} rt={rtr_v}')
+            # Per-router data
+            lsdb_v = rtable_v = 0
+            for p in router_timelines.get(rid, []):
+                if p[0] > seq: break
+                lsdb_v = p[1]; rtable_v = p[2]
+            agg_all.append((total_db, total_lr, total_rtr, lsdb_v, rtable_v, detail_if))
 
-        # Màu: lấy màu của interface đầu tiên của router này
         c = COLORS[list(by_router.keys()).index(rid) % len(COLORS)]
-        label = f'R{rid} data'
-
-        hover = [
-            f'seq={s}<br>R{rid} LSAs to fetch: {agg[s]}'
-            for s in range(total_events)
-        ]
+        hover = []
+        y_vals = []
+        for s in range(total_events):
+            db, lr, rtr, lsdb, rtable, details = agg_all[s]
+            # Y value = tổng tất cả vector fields
+            y = db + lr + rtr + lsdb + rtable
+            y_vals.append(y)
+            detail_str = '<br>'.join(details) if details else '<i>(all empty)</i>'
+            hover.append(
+                f'<b>Event #{s}</b>  |  <b>R{rid}</b><br>'
+                f'──── Per Interface ────<br>'
+                f'{detail_str}<br>'
+                f'──── Router Totals ────<br>'
+                f'DB Summary List:       {db}<br>'
+                f'LinkStateReq List:     {lr}<br>'
+                f'LinkStateRetr List:    {rtr}<br>'
+                f'LSDB (Router-LSAs):    {lsdb}<br>'
+                f'RoutingTable entries:  {rtable}<br>'
+                f'<b>Tổng data: {y}</b>'
+            )
 
         fig.add_trace(go.Scatter(
-            x=list(range(total_events)), y=pcts,
+            x=list(range(total_events)), y=y_vals,
             mode='lines',
-            name=label,
-            legendgroup=label,
+            name=f'R{rid} data',
+            legendgroup=f'R{rid}',
             showlegend=True,
             line=dict(color=c, width=2, dash='dash'),
             hovertemplate='%{text}<extra></extra>',
@@ -217,23 +261,31 @@ def build_figure(timelines, total_events):
             yaxis='y2',
         ))
 
-        color_idx += 1
-
     n_traces = len(fig.data)
-    n_state = len(timelines)       # 24 state lines
-    n_data  = n_traces - n_state   # data lines
+    n_state = len(timelines)
+    n_data  = n_traces - n_state
+    # Y2 range based on max tổng data
+    all_y = []
+    for pts in timelines.values():
+        for p in pts:
+            all_y.append(p[6] + p[7] + p[8] + p[9] + p[10])
+    for pts in router_timelines.values():
+        for p in pts:
+            all_y.append(p[1] + p[2])
+    global_max = max(all_y) if all_y else 10
     fig.update_layout(
-        title=dict(text=f'OSPF States — {total_events} events ({global_max} max data)',
+        title=dict(text=f'OSPF States — {total_events} events — Data = DB+Lr+RT+LSDB+RTab',
                    font=dict(size=14)),
         xaxis=dict(title='Event #', tickmode='linear', tick0=0,
-                   dtick=10, gridcolor='#eee'),
+                   dtick=max(1, total_events // 20), range=[-0.5, total_events - 0.5],
+                   gridcolor='#eee'),
         yaxis=dict(title='Neighbor State',
                    tickvals=list(range(len(NBR_STATE_NAMES))),
                    ticktext=NBR_STATE_NAMES,
                    range=[-0.2, len(NBR_STATE_NAMES) - 0.8],
                    gridcolor='#eee'),
-        yaxis2=dict(title='LSAs to fetch',
-                    range=[0, 11],
+        yaxis2=dict(title='Total data (items)',
+                    range=[0, global_max + 1],
                     overlaying='y', side='right',
                     gridcolor='#f0f0f0'),
         legend=dict(
@@ -280,10 +332,10 @@ def main():
                           [args.subphase] if args.subphase else None)
     print(f'Global events: {len(events)}')
 
-    timelines = build_timelines(events)
+    timelines, router_timelines = build_timelines(events)
     print(f'Interfaces tracked: {len(timelines)}')
 
-    fig = build_figure(timelines, len(events))
+    fig = build_figure(timelines, router_timelines, len(events))
     fig.write_html(args.output, include_plotlyjs='cdn', auto_open=True)
     print(f'Output: {args.output}')
 

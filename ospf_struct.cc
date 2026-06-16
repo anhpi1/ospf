@@ -795,3 +795,360 @@ DdResult databaseDescriptionData::processDD(const headerOspf& hdr,
     r.valid = true;
     return r;
 }
+
+
+// ============================================================
+// Helper: so sánh 2 LSA instance — trả về true nếu a mới hơn b
+// RFC 2328 Section 13.1 (Determining which LSA is newer)
+// ============================================================
+static bool isNewerLSA(const LSAHeader& a, const LSAHeader& b) {
+    if (a.sequenceNumber != b.sequenceNumber)
+        return a.sequenceNumber > b.sequenceNumber;
+    if (a.checksum != b.checksum)
+        return (uint16_t)a.checksum > (uint16_t)b.checksum;
+    // Cùng seq + checksum: MaxAge ⇒ cái kia mới hơn
+    if (a.age == 0xFFFF && b.age != 0xFFFF) return false;
+    if (b.age == 0xFFFF && a.age != 0xFFFF) return true;
+    return false;   // same instance
+}
+
+
+// ============================================================
+// linkStateRequestData::sendLSR
+// RFC 2328 Section 10.9 + A.3.4 — Link State Request packet
+// ============================================================
+
+void linkStateRequestData::sendLSR(int ifIndex, OspfRouterState& state,
+                                    uint32_t routerId,
+                                    omnetpp::cSimpleModule* mod)
+{
+    InterfaceData* iface = &state.interfaces[ifIndex];
+    NeighborData* nbr = iface->neighbor;
+
+    // Lấy các request từ đầu linkStateRequestList
+    // ⚠ KHÔNG xóa khỏi list — giữ lại để retransmit (Section 10.9)
+    int nReq = (int)nbr->linkStateRequestList.size();
+    if (nReq == 0) return;  // không có gì để request
+
+    // Xây LSR body: mỗi request 12 byte (LS type, Link State ID, Advertising Router)
+    int bodyLen = nReq * 12;
+    std::vector<uint8_t> body(bodyLen);
+    int off = 0;
+    for (const auto& lh : nbr->linkStateRequestList) {
+        put32(body.data(), off, lh.type);           // LS type
+        put32(body.data(), off, lh.linkStateId);    // Link State ID
+        put32(body.data(), off, lh.advertisingRouter); // Advertising Router
+    }
+
+    OspfMess::send(3, body, routerId, iface->areaID, ifIndex, mod);
+}
+
+
+// ============================================================
+// linkStateRequestData::processLSR
+// RFC 2328 Section 10.7 — Receiving Link State Request packets
+// ============================================================
+
+LsrResult linkStateRequestData::processLSR(const headerOspf& hdr,
+                                            const std::vector<uint8_t>& data,
+                                            InterfaceData* iface,
+                                            const std::vector<LSA>& routerLSAs)
+{
+    LsrResult r = {false, false, {}};
+
+    // Parse LSR body (Section A.3.4)
+    int remain = (int)data.size();
+    if (remain == 0 || remain % 12 != 0) return r;  // invalid
+
+    int nReq = remain / 12;
+
+    // Duyệt từng request, tra LSDB (Section 10.7)
+    for (int i = 0; i < nReq; i++) {
+        int off = i * 12;
+        uint32_t lsType      = get32(data.data(), off);
+        uint32_t linkStateId = get32(data.data(), off);
+        uint32_t advRouter   = get32(data.data(), off);
+
+        if (lsType != 1) {  // Dự án chỉ có Router-LSA (type=1)
+            r.badLSReq = true;
+            return r;
+        }
+
+        // Tra LSDB: tìm LSA có (type, linkStateId, advertisingRouter)
+        bool found = false;
+        for (const auto& lsa : routerLSAs) {
+            if (lsa.header.type == lsType
+                && lsa.header.linkStateId == linkStateId
+                && lsa.header.advertisingRouter == advRouter)
+            {
+                r.lsus.push_back(lsa);   // copy vào LSU body
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            r.badLSReq = true;   // Section 10.7: "If an LSA cannot be found → BadLSReq"
+            return r;
+        }
+    }
+
+    // ⚠ Section 10.7: "These LSAs should NOT be placed on the Link state
+    //    retransmission list" → không thêm vào linkStateRetransmissionList
+    r.valid = true;
+    return r;
+}
+
+
+// ============================================================
+// linkStateUpdateData::sendLSU
+// RFC 2328 Section 13 + A.3.5 — Link State Update packet
+// ============================================================
+
+void linkStateUpdateData::sendLSU(int ifIndex, const std::vector<LSA>& lsas,
+                                   uint32_t routerId, uint32_t areaId,
+                                   omnetpp::cSimpleModule* mod)
+{
+    if (lsas.empty()) return;
+
+    // Tính tổng body size: 4 byte (numberOfLSA) + các LSA (header 20 + links)
+    int bodyLen = 4;
+    for (const auto& lsa : lsas) {
+        // LSA body = 20 byte header + 4 byte flags/zero/numLinks + links
+        int lsaBodyLen = 24;  // header(20) + flags(1) + zero(1) + numLinks(2)
+        for (const auto& link : lsa.links) {
+            lsaBodyLen += 12;  // linkID(4) + linkData(4) + type(1) + numTOS(1) + metric(2)
+            lsaBodyLen += (int)link.Data.size() * 4;  // mỗi TOS: tos(1) + zero(1) + metric(2)
+        }
+        bodyLen += lsaBodyLen;
+    }
+
+    std::vector<uint8_t> body(bodyLen);
+    int off = 0;
+    put32(body.data(), off, (uint32_t)lsas.size());  // numberOfLSA
+
+    for (const auto& lsa : lsas) {
+        // LSA header (20 byte)
+        put16(body.data(), off, lsa.header.age);
+        put8(body.data(), off, lsa.header.options);
+        put8(body.data(), off, lsa.header.type);
+        put32(body.data(), off, lsa.header.linkStateId);
+        put32(body.data(), off, lsa.header.advertisingRouter);
+        put32(body.data(), off, (uint32_t)lsa.header.sequenceNumber);
+        put16(body.data(), off, lsa.header.checksum);
+        put16(body.data(), off, lsa.header.length);
+        // LSA body — Router-LSA: flags(1) + zero(1) + numLinks(2) + links
+        put8(body.data(), off, lsa.flags);
+        put8(body.data(), off, lsa.zero);
+        put16(body.data(), off, lsa.numLinks);
+        for (const auto& link : lsa.links) {
+            put32(body.data(), off, link.linkID);
+            put32(body.data(), off, link.linkData);
+            put8(body.data(), off, link.type);
+            put8(body.data(), off, link.numTOS);
+            put16(body.data(), off, link.metric);
+            for (const auto& tos : link.Data) {
+                put8(body.data(), off, tos.TOSid);
+                put8(body.data(), off, tos.zero);
+                put16(body.data(), off, tos.metric);
+            }
+        }
+    }
+
+    OspfMess::send(4, body, routerId, areaId, ifIndex, mod);
+}
+
+
+// ============================================================
+// linkStateUpdateData::processLSU
+// RFC 2328 Section 13 (Flooding Procedure) steps 1-8
+// ============================================================
+
+LsuResult linkStateUpdateData::processLSU(const headerOspf& hdr,
+                                           const std::vector<uint8_t>& data,
+                                           InterfaceData* iface,
+                                           AreaData& area,
+                                           std::vector<LSAHeader>& requestList)
+{
+    LsuResult r = {false, false, false, false, {}};
+    if (data.size() < 4) return r;
+
+    // Parse LSU body (Section A.3.5)
+    int off = 0;
+    uint32_t numberOfLSAs = get32(data.data(), off);
+
+    // Parse từng LSA
+    std::vector<LSA> lsas;
+    for (uint32_t i = 0; i < numberOfLSAs; i++) {
+        LSA lsa;
+        if ((int)data.size() - off < 20) { r.valid = false; return r; }
+        // LSA header (20 byte)
+        lsa.header.age              = get16(data.data(), off);
+        lsa.header.options          = get8(data.data(), off);
+        lsa.header.type             = get8(data.data(), off);
+        lsa.header.linkStateId      = get32(data.data(), off);
+        lsa.header.advertisingRouter = get32(data.data(), off);
+        lsa.header.sequenceNumber   = (int32_t)get32(data.data(), off);
+        lsa.header.checksum         = get16(data.data(), off);
+        lsa.header.length           = get16(data.data(), off);
+
+        // Router-LSA body (24 byte header + links)
+        if (lsa.header.type == 1) {  // Router-LSA
+            if ((int)data.size() - off < 4) { r.valid = false; return r; }
+            lsa.flags    = get8(data.data(), off);
+            lsa.zero     = get8(data.data(), off);
+            lsa.numLinks = get16(data.data(), off);
+            for (uint16_t j = 0; j < lsa.numLinks; j++) {
+                LSALink link;
+                if ((int)data.size() - off < 12) { r.valid = false; return r; }
+                link.linkID   = get32(data.data(), off);
+                link.linkData = get32(data.data(), off);
+                link.type     = get8(data.data(), off);
+                link.numTOS   = get8(data.data(), off);
+                link.metric   = get16(data.data(), off);
+                for (uint8_t t = 0; t < link.numTOS; t++) {
+                    TOSData tos;
+                    if ((int)data.size() - off < 4) { r.valid = false; return r; }
+                    tos.TOSid = get8(data.data(), off);
+                    tos.zero  = get8(data.data(), off);
+                    tos.metric = get16(data.data(), off);
+                    link.Data.push_back(tos);
+                }
+                lsa.links.push_back(link);
+            }
+        }
+        // Các type khác (dự án bỏ qua) — chỉ parse length byte
+        else {
+            if (lsa.header.length < 20) { r.valid = false; return r; }
+            int skip = lsa.header.length - 20;
+            if ((int)data.size() - off < skip) { r.valid = false; return r; }
+            off += skip;
+        }
+        lsas.push_back(lsa);
+    }
+
+    // ============================================================
+    // Section 13: xử lý từng LSA
+    // ============================================================
+    for (auto& recvLsa : lsas) {
+        // (1) Validate checksum — dự án bỏ qua
+        // (2) LS type unknown?
+        if (recvLsa.header.type < 1 || recvLsa.header.type > 5) continue;
+        // (3) AS-external trong stub? — backbone non-stub → pass
+        // (4) MaxAge + no DB copy + no neighbor Exchange/Loading?
+        //     LSA mới, age=0 → không rơi vào case này
+
+        // Tra LSDB: tìm bản copy hiện tại
+        bool dbHasIt = false;
+        for (auto& dbLsa : area.routerLSAs) {
+            if (dbLsa.header.type == recvLsa.header.type
+                && dbLsa.header.linkStateId == recvLsa.header.linkStateId
+                && dbLsa.header.advertisingRouter == recvLsa.header.advertisingRouter)
+            {
+                dbHasIt = true;
+
+                // (5) received newer?
+                if (isNewerLSA(recvLsa.header, dbLsa.header)) {
+                    // (5a) MinLSArrival — bỏ qua
+                    // (5b) Flood — placeholder (1c)
+                    // (5c) Xóa DB copy cũ khỏi retransmission lists
+                    // (5d) Install: replace DB copy
+                    dbLsa = recvLsa;
+                    r.scheduleSPF = true;
+                    // (5e) ACK
+                    r.ackHeaders.push_back(recvLsa.header);
+                    // Loading specific: xóa khỏi linkStateRequestList nếu có
+                    for (auto it = requestList.begin(); it != requestList.end(); ) {
+                        if (it->type == recvLsa.header.type
+                            && it->linkStateId == recvLsa.header.linkStateId
+                            && it->advertisingRouter == recvLsa.header.advertisingRouter)
+                        {
+                            it = requestList.erase(it);
+                        } else {
+                            ++it;
+                        }
+                    }
+                }
+                // (6) received không mới hơn + trong request list của sending neighbor?
+                //     → BadLSReq. Trong 1b2 Loading: neighbor không có LSA của ta
+                //     trong request list của nó. Case này chủ yếu cho Flooding (1c).
+                else if (false) {  // không xảy ra trong 1b2 — để dành cho 1c
+                    r.badLSReq = true;
+                    r.valid = true;
+                    return r;
+                }
+                // (7) Same instance (duplicate)?
+                else if (!isNewerLSA(recvLsa.header, dbLsa.header)
+                         && !isNewerLSA(dbLsa.header, recvLsa.header))
+                {
+                    // (7a) Implicit ACK nếu trong retransmission list
+                    // (7b) ACK
+                    r.ackHeaders.push_back(recvLsa.header);
+                }
+                // (8) DB copy mới hơn
+                else {
+                    // Gửi DB copy về neighbor — 1c sẽ xử lý
+                }
+
+                dbHasIt = true;
+                break;
+            }
+        }
+
+        // Không có DB copy (LSA mới)
+        if (!dbHasIt) {
+            // (5) Install new LSA into LSDB
+            area.routerLSAs.push_back(recvLsa);
+            r.scheduleSPF = true;
+            // (5e) ACK
+            r.ackHeaders.push_back(recvLsa.header);
+            // Loading specific: xóa khỏi request list
+            for (auto it = requestList.begin(); it != requestList.end(); ) {
+                if (it->type == recvLsa.header.type
+                    && it->linkStateId == recvLsa.header.linkStateId
+                    && it->advertisingRouter == recvLsa.header.advertisingRouter)
+                {
+                    it = requestList.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+
+    // LoadingDone: request list rỗng (Section 10.9 + 10.3)
+    r.loadingDone = requestList.empty();
+    r.valid = true;
+    return r;
+}
+
+
+// ============================================================
+// linkStateAcknowledgementData::sendLSAck
+// RFC 2328 Section 13.5 + A.3.6 — Link State Acknowledgment packet
+// ============================================================
+
+void linkStateAcknowledgementData::sendLSAck(int ifIndex,
+                                              const std::vector<LSAHeader>& headers,
+                                              uint32_t routerId, uint32_t areaId,
+                                              omnetpp::cSimpleModule* mod)
+{
+    if (headers.empty()) return;
+
+    // Body = list of LSA headers (mỗi header 20 byte)
+    int bodyLen = (int)headers.size() * 20;
+    std::vector<uint8_t> body(bodyLen);
+    int off = 0;
+    for (const auto& h : headers) {
+        put16(body.data(), off, h.age);
+        put8(body.data(), off, h.options);
+        put8(body.data(), off, h.type);
+        put32(body.data(), off, h.linkStateId);
+        put32(body.data(), off, h.advertisingRouter);
+        put32(body.data(), off, (uint32_t)h.sequenceNumber);
+        put16(body.data(), off, h.checksum);
+        put16(body.data(), off, h.length);
+    }
+
+    OspfMess::send(5, body, routerId, areaId, ifIndex, mod);
+}

@@ -81,3 +81,5 @@ tiếp tục ngồi sửa cấu trúc dữ Liệu
 viết cho trạng thái Exchange
 
 Viết cho trạng thái loading
+
+xây dựng tool debug, hiển thị trực quan state và data

@@ -313,11 +313,39 @@ class databaseDescriptionData
                                   const std::vector<LSA>& routerLSAs);
 };
 
+// Struct kết quả processLSR (Rule 8: XxxResult pattern)
+struct LsrResult {
+    bool valid;                // false → BadLSReq / lỗi
+    bool badLSReq;             // true → handleMessage chuyển ExStart
+    std::vector<LSA> lsus;     // LSAs cần gửi về trong LSU
+};
+
+// Struct kết quả processLSU (Rule 8 pattern)
+struct LsuResult {
+    bool valid;                // false → drop gói
+    bool loadingDone;          // true → state = Full
+    bool scheduleSPF;          // true → schedule SPF
+    bool badLSReq;             // true → BadLSReq (Section 13 step 6)
+    std::vector<LSAHeader> ackHeaders;  // LSA headers cần ACK
+};
+
 class linkStateRequestData
 {
     public:
         std::vector<LSARequest> requests;
 
+        // Gửi LSR packet (RFC 2328 Section 10.9 + A.3.4)
+        // Lấy đầu linkStateRequestList, KHÔNG xóa khỏi list (giữ lại để retransmit)
+        static void sendLSR(int ifIndex, OspfRouterState& state,
+                            uint32_t routerId, omnetpp::cSimpleModule* mod);
+
+        // Xử lý LSR packet nhận (RFC 2328 Section 10.7)
+        // Tra LSDB → copy LSA vào LSU body. Nếu không tìm thấy → BadLSReq.
+        // KHÔNG đụng timer. Trả về LsrResult.
+        static LsrResult processLSR(const headerOspf& hdr,
+                                     const std::vector<uint8_t>& data,
+                                     InterfaceData* iface,
+                                     const std::vector<LSA>& routerLSAs);
 };
 
 class linkStateUpdateData
@@ -325,6 +353,21 @@ class linkStateUpdateData
     public:
         uint32_t numberOfLSA;
         std::vector<LSA> LSAs;
+
+        // Gửi LSU packet (RFC 2328 Section 13 + A.3.5)
+        static void sendLSU(int ifIndex, const std::vector<LSA>& lsas,
+                            uint32_t routerId, uint32_t areaId,
+                            omnetpp::cSimpleModule* mod);
+
+        // Xử lý LSU packet nhận (RFC 2328 Section 13 steps 1-8)
+        // Validate từng LSA → so sánh với LSDB → cài / ACK / discard.
+        // Truncate linkStateRequestList nếu LSA là response cho LSR.
+        // KHÔNG đụng timer. Trả về LsuResult.
+        static LsuResult processLSU(const headerOspf& hdr,
+                                     const std::vector<uint8_t>& data,
+                                     InterfaceData* iface,
+                                     AreaData& area,
+                                     std::vector<LSAHeader>& requestList);
 };
 
 //type 5
@@ -332,6 +375,11 @@ class linkStateAcknowledgementData
 {
     public:
         std::vector<LSAHeader> data;
+
+        // Gửi LSAck packet (RFC 2328 Section 13.5 + A.3.6)
+        static void sendLSAck(int ifIndex, const std::vector<LSAHeader>& headers,
+                              uint32_t routerId, uint32_t areaId,
+                              omnetpp::cSimpleModule* mod);
 };
 class OspfMess : public omnetpp::cMessage
 {

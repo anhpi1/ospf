@@ -1,0 +1,780 @@
+================================================================================
+1b2 — Loading (Kéo dữ liệu LSA về)
+  Section 10.3 (Neighbor state machine — event LoadingDone)
+  10.7 (Receiving Link State Request Packets)
+  10.9 (Sending Link State Request Packets)
+  13 (Flooding Procedure — xử lý LSU)
+  13.1 (Determining which LSA is newer)
+  13.2 (Installing LSAs in the database)
+  13.5 (Sending Link State Acknowledgment packets)
+  A.3.4 (Link State Request packet format)
+  A.3.5 (Link State Update packet format)
+  A.3.6 (Link State Acknowledgment packet format)
+================================================================================
+
+Mục tiêu: Khi Exchange kết thúc (ExchangeDone), mỗi bên biết LSA nào còn thiếu
+  trong LSDB của mình. Bên thiếu (Loading state) gửi LSR yêu cầu LSA → nhận
+  LSU → cài vào LSDB → gửi LSAck. Khi hết thiếu → LoadingDone → Full.
+
+Lưu ý scope dự án (tra trong docs/plan thinking/):
+  - P2P only → mỗi interface có đúng 1 neighbor (cấp phát tĩnh)
+  - Single-area (backbone 0.0.0.0)
+  - Router-LSA only (type=1), không có Network/Summary/AS-external-LSA
+  - Không xác thực (AuType=0), checksum luôn 0 (dự án bỏ qua validate checksum)
+  - Interface MTU = 0 (bỏ qua trên P2P)
+  - Timer rút gọn: RxmtInterval = 0.5s (so với 5s chuẩn)
+
+================================================================================
+CẤU TRÚC TỔNG QUAN (dạng tree)
+================================================================================
+
+1b2: LOADING
+│
+├── [Flow] KHỞI ĐỘNG LOADING — chạy 1 lần khi ExchangeDone (Section 10.3)
+│   └── Điều kiện vào: neighbor.state == Exchange(5) AND ExchangeDone event
+│       │
+│       ├── [Tree] linkStateRequestList rỗng?
+│       │   │
+│       │   ├── CÓ → neighbor.state = Full(7)
+│       │   │   └── [TODO] chuyển 1c (originate Router-LSA + flood)
+│       │   │
+│       │   └── KHÔNG → neighbor.state = Loading(6)
+│       │       ├── Gửi LSR đầu tiên từ đầu linkStateRequestList
+│       │       │   (xem 1b2.A)
+│       │       └── Schedule rxmtTimer
+│       │
+│       └── Cancel rxmtTimer DD cũ (không còn retransmit DD nữa)
+│
+├── [Parallel] MỖI NEIGHBOR TRẠNG THÁI LOADING — chạy song song, độc lập
+│   (Trong P2P: mỗi interface có đúng 1 neighbor, tối đa N tiến trình song song
+│    với N = số interface của router)
+│   │
+│   ├── 1b2.A — [Loop] GỬI LSR + RETRANSMIT (Section 10.9)
+│   │   ├── Điều kiện lặp: neighbor.state == Loading(6)
+│   │   │   AND linkStateRequestList chưa rỗng
+│   │   ├── Điều kiện kết thúc:
+│   │   │   ├── linkStateRequestList.empty() → sinh LoadingDone → Full
+│   │   │   └── neighbor.state thay đổi (SeqNumberMismatch/BadLSReq/
+│   │   │       1-Way/InactivityTimer/KillNbr) → hủy quá trình
+│   │   │
+│   │   └── Thân loop — gồm 2 kích hoạt:
+│   │       │
+│   │       ├── [Flow] KÍCH HOẠT 1 — GỬI LSR MỚI
+│   │       │   └── Khi: vừa vào Loading(6) HOẶC vừa nhận LSU hợp lệ
+│   │       │       │
+│   │       │       ├── 1. Lấy đầu linkStateRequestList
+│   │       │       │   └── Đóng gói 1 hoặc nhiều LSARequest đầu list
+│   │       │       │       vào LSR packet (Section A.3.4)
+│   │       │       │       ⚠ Chỉ gửi tối đa 1 LSR outstanding tại 1 thời điểm
+│   │       │       │         (Section 10.9: "at most one Link State Request packet
+│   │       │       │          outstanding at any one time")
+│   │       │       │
+│   │       │       ├── 2. Gửi LSR ra cổng tương ứng
+│   │       │       │   └── OspfMess::send(3, body, routerId, 0, ifIndex, mod)
+│   │       │       │       type=3 = Link State Request
+│   │       │       │       ⚠ Các item trong linkStateRequestList KHÔNG bị xóa ở bước này.
+│   │       │       │         Chúng được giữ lại trong list để retransmit nếu neighbor
+│   │       │       │         không trả lời LSU trong RxmtInterval.
+│   │       │       │         (Section 10.9: "LSAs ... that have been requested, but not
+│   │       │       │          yet received, are packaged ... for retransmission")
+│   │       │       │         Chỉ bị xóa (truncated) khi nhận được LSU — xem 1b2.B.
+│   │       │       │
+│   │       │       └── 3. (Re)schedule rxmtTimer = now + rxmtInterval
+│   │       │           └── Để retransmit nếu neighbor không trả lời LSU
+│   │       │
+│   │       └── [Loop] KÍCH HOẠT 2 — RETRANSMIT LSR (rxmtTimer)
+│   │           └── Khi: rxmtTimer cháy
+│   │               ├── Điều kiện: neighbor.state == Loading(6)
+│   │               │   AND có LSR đang outstanding (chưa nhận LSU)
+│   │               │
+│   │               ├── Retransmit lại LSR giống hệt lần trước
+│   │               │   └── (Các LSARequest vừa gửi vẫn cần được response)
+│   │               │
+│   │               └── Reschedule rxmtTimer = now + rxmtInterval
+│   │                   └── Điều kiện kết thúc loop retransmit:
+│   │                       nhận được LSU hoặc neighbor state thay đổi
+│   │
+│   ├── 1b2.B — [Flow + Tree] XỬ LÝ LSU ĐẾN (Section 13)
+│   │   └── Điều kiện kích hoạt: nhận gói tin type=4 (Link State Update)
+│   │       │
+│   │       ├── [Pre-check] neighbor.state >= Exchange(5)?
+│   │       │   (Section 13: "If the neighbor is in a lesser state than Exchange,
+│   │       │    the packet should be dropped without further processing")
+│   │       │   │
+│   │       │   ├── NO → delete msg (drop)
+│   │       │   └── YES → tiếp tục
+│   │       │       ⚠ Trong Loading state: LSU đến là response cho LSR của mình
+│   │       │
+│   │       ├── [Loop] Với mỗi LSA trong LSU packet
+│   │       │   (Section 13, steps 1-8 cho mỗi LSA)
+│   │       │   │
+│   │       │   ├── [Check] Validate LS checksum (Section 13 (1))
+│   │       │   │   └── Invalid → discard LSA, lấy LSA tiếp theo
+│   │       │   │       (dự án bỏ qua checksum → luôn pass)
+│   │       │   │
+│   │       │   ├── [Check] LS type hợp lệ (Section 13 (2))
+│   │       │   │   ├── type 1-5 → hợp lệ
+│   │       │   │   └── Unknown type → discard
+│   │       │   │       (dự án chỉ có type=1 → luôn pass)
+│   │       │   │
+│   │       │   ├── [Check] AS-external trong stub? (Section 13 (3))
+│   │       │   │   └── Dự án area backbone, non-stub → luôn pass
+│   │       │   │
+│   │       │   ├── [Check] MaxAge không có DB copy? (Section 13 (4))
+│   │       │   │   └── Nếu LS age == MaxAge AND không có trong DB
+│   │       │   │       AND không neighbor nào ở Exchange/Loading
+│   │       │   │       → LSAck + discard
+│   │       │   │       (dự án LSA mới, age=0 → không rơi vào case này)
+│   │       │   │
+│   │       │   ├── [Check + Tree] So sánh LSA với LSDB (Section 13.1, Steps (5)-(8))
+│   │       │   │   (Section 13.1: so sánh sequenceNumber >, nếu bằng
+│   │       │   │    thì checksum >, nếu vẫn bằng thì MaxAge)
+│   │       │   │   │
+│   │       │   │   ├── [Case (5)] DB không có HOẶC received newer
+│   │       │   │   │   (Section 13 (5))
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Check] MinLSArrival (Section 13 (5a))
+│   │       │   │   │   │   └── Nếu DB copy vừa được cài < MinLSArrival
+│   │       │   │   │   │       → discard (không ACK), lấy LSA tiếp
+│   │       │   │   │   │       (dự án bỏ qua timing → luôn pass)
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Action] Flood LSA ra neighbor ≥ Exchange
+│   │       │   │   │   │   (Section 13 (5b) + 13.3)
+│   │       │   │   │   │   ⚠ Đây là 1c (Flooding) — 1b2 placeholder:
+│   │       │   │   │   │     chỉ cần ghi nhận, flood sau khi 1b2 xong
+│   │       │   │   │   │     hoặc gọi luôn nếu hàm flood đã có
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Action] Xóa DB copy cũ khỏi
+│   │       │   │   │   │   linkStateRetransmissionList mọi neighbor
+│   │       │   │   │   │   (Section 13 (5c))
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Action] Cài LSA mới vào LSDB (Section 13 (5d) + 13.2)
+│   │       │   │   │   │   ├── Thêm vào area.routerLSAs[]
+│   │       │   │   │   │   │   (Nếu đã có → replace; nếu chưa → push)
+│   │       │   │   │   │   └── Time stamp LSA (simTime())
+│   │       │   │   │   │       └── Schedule SPF (Section 13.2)
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Action] Gửi LSAck (Section 13 (5e) + 13.5)
+│   │       │   │   │   │   └── OspfMess::send(5, body, ...)
+│   │       │   │   │   │       type=5 = Link State Acknowledgment
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Check] Self-originated LSA (Section 13 (5f))
+│   │       │   │   │   │   └── Nếu advertisingRouter == myRouterId
+│   │       │   │   │   │       → Section 13.4: update/new instance
+│   │       │   │   │   │       (Dự án: chỉ originate khi có event → bỏ qua)
+│   │       │   │   │   │
+│   │       │   │   │   └── [Action] Xóa LSA khỏi linkStateRequestList
+│   │       │   │   │       ⚠ Đây là hành động đặc thù của Loading: Khi nhận được
+│   │       │   │   │         LSA mới mà ta đang cần (trong request list), xóa nó khỏi
+│   │       │   │   │         list. Đây chính là "truncated" trong Section 10.9.
+│   │       │   │   │       └── So sánh (type, linkStateId, advertisingRouter)
+│   │       │   │   │
+│   │       │   │   ├── [Case (6)] DB tồn tại, received không mới hơn (cũ/bằng),
+│   │       │   │   │   VÀ LSA còn trong linkStateRequestList của sending neighbor
+│   │       │   │   │   (Section 13 (6))
+│   │       │   │   │   │
+│   │       │   │   │   └── BadLSReq event (state = ExStart)
+│   │       │   │   │       Section 13 (6): "an error has occurred in the Database
+│   │       │   │   │       Exchange process"
+│   │       │   │   │       ⚠ Dự án: Trong Loading, neighbor gửi LSU trả lời LSR của
+│   │       │   │   │         ta. neighbor không có LSA của ta trong request list của nó.
+│   │       │   │   │         Case này chủ yếu xảy ra trong Flooding (1c) khi neighbor
+│   │       │   │   │         gửi LSA mà neighbor vẫn đang chờ nhận từ ta.
+│   │       │   │   │
+│   │       │   │   ├── [Case (7)] Same instance (duplicate)
+│   │       │   │   │   (Section 13 (7))
+│   │       │   │   │   │
+│   │       │   │   │   ├── [Check] Trong retransmission list của
+│   │       │   │   │   │   sending neighbor? (Section 13 (7a))
+│   │       │   │   │   │   └── CÓ → Implicit ACK: xóa khỏi list
+│   │       │   │   │   │
+│   │       │   │   │   └── [Action] Gửi LSAck (Section 13 (7b))
+│   │       │   │   │
+│   │       │   │   └── [Case (8)] DB copy mới hơn received
+│   │       │   │       (Section 13 (8))
+│   │       │   │       │
+│   │       │   │       └── [Action] Gửi DB copy về neighbor
+│   │       │   │           └── Gửi LSU chứa DB copy (không vào
+│   │       │   │               retransmission list, không ACK)
+│   │       │   │
+│   │       │   └── [Action] Xóa LSA khỏi linkStateRequestList
+│   │       │       ⚠ Chỉ thực hiện NẾU LSA này đang có trong
+│   │       │         linkStateRequestList của neighbor đã gửi LSU
+│   │       │         (tức là LSA response cho LSR của mình)
+│   │       │         └── So sánh (type, linkStateId, advertisingRouter)
+│   │       │
+│   │       └── [Tree] SAU KHI XỬ LÝ XONG MỌI LSA TRONG LSU:
+│   │           │
+│   │           ├── [Tree] linkStateRequestList.empty()?
+│   │           │   │
+│   │           │   ├── CÓ → LoadingDone (Section 10.3)
+│   │           │   │   ├── neighbor.state = Full(7)
+│   │           │   │   ├── Cancel rxmtTimer
+│   │           │   │   ├── [TODO] 1c: originate Router-LSA + flood
+│   │           │   │   └── Log transition
+│   │           │   │
+│   │           │   └── KHÔNG → Gửi LSR tiếp theo (1b2.A)
+│   │           │       └── Lấy đầu linkStateRequestList (các item chưa gửi)
+│   │           │           → tạo LSR mới → gửi + reschedule rxmtTimer
+│   │           │
+│   │           └── [note] Nếu vì lý do nào đó Loading không thể tiến triển
+│   │               (ví dụ neighbor không trả lời), rxmtTimer sẽ cháy
+│   │               và retransmit LSR. Nếu quá số lần → có thể coi neighbor
+│   │               chết (InactivityTimer sẽ handle).
+│   │
+│   └── 1b2.C — [Flow + Tree] XỬ LÝ LSR ĐẾN (Section 10.7)
+│       └── Điều kiện kích hoạt: nhận gói tin type=3 (Link State Request)
+│           │
+│           ├── [Pre-check] neighbor.state >= Exchange(5)?
+│           │   (Section 10.7: "Link State Request Packets should be accepted
+│           │    when the neighbor is in states Exchange, Loading, or Full")
+│           │   │
+│           │   ├── NO → delete msg (ignore)
+│           │   └── YES → tiếp tục
+│           │       ⚠ Trong 1b2: neighbor bên kia đang Loading(6)
+│           │         hoặc Full(7) → ta cần trả lời LSU
+│           │
+│           ├── Parse LSR body (Section A.3.4):
+│           │   └── [Loop] Đọc đến hết data
+│           │       └── Mỗi 12 byte → 1 LSARequest
+│           │           ├── get32 → LS type
+│           │           ├── get32 → Link State ID
+│           │           └── get32 → Advertising Router
+│           │
+│           ├── [Loop] Với mỗi LSARequest trong LSR:
+│           │   ├── Tra LSDB: tìm LSA trong area.routerLSAs[]
+│           │   │   └── So khớp (LS type, Link State ID, Advertising Router)
+│           │   │       │
+│           │   │       ├── [Tree] Tìm thấy?
+│           │   │       │   ├── CÓ → copy toàn bộ LSA vào LSU body
+│           │   │       │   │   (Section 10.7: "Each LSA specified ... should be
+│           │   │       │   │    located in the router's database, and copied
+│           │   │       │   │    into Link State Update packets")
+│           │   │       │   │   ⚠ Section 10.7: "These LSAs should NOT be placed
+│           │   │       │   │     on the Link state retransmission list"
+│           │   │       │   │
+│           │   │       │   └── KHÔNG → BadLSReq event (Section 10.7)
+│           │   │       │       ├── neighbor.state = ExStart(4)
+│           │   │       │       ├── Xóa 3 list: databaseSummary, request,
+│           │   │       │       │   retransmission
+│           │   │       │       ├── ddSeq++, isMaster=1
+│           │   │       │       ├── Gửi DD rỗng I+M+MS (restart ExStart)
+│           │   │       │       ├── Cancel rxmtTimer (DD/LSR timer)
+│           │   │       │       └── Log error
+│           │   │       │       (Dự án P2P: lỗi này rất hiếm vì DD exchange
+│           │   │       │        đã đồng bộ danh sách LSA trước đó)
+│           │
+│           └── [Action] GỬI LSU RESPONSE
+│               └── Nếu không có BadLSReq:
+│                   ├── Xây LSU body (Section A.3.5)
+│                   │   ├── put32 — numberOfLSA (số LSA trong response)
+│                   │   └── [Loop] Với mỗi LSA tìm được:
+│                   │       └── Copy toàn bộ LSA (header + body)
+│                   │
+│                   └── Gửi ra cổng tương ứng
+│                       └── OspfMess::send(4, body, routerId, 0, ifIndex, mod)
+│                           type=4 = Link State Update
+│
+└── ── (Tương tác giữa các tiến trình) ──
+    │
+    ├── 1b2.A (gửi LSR) và 1b2.B (nhận LSU) giao tiếp qua
+    │   linkStateRequestList:
+    │   - 1b2.A lấy item từ đầu list → gửi LSR (giữ lại để retransmit)
+    │   - 1b2.B nhận LSU → xóa LSA tương ứng khỏi list
+    │   - 1b2.A kiểm tra list.empty() → quyết định có tiếp LSR không
+    │
+    ├── 1b2.B (nhận LSU) và 1b2.C (xử lý LSR) là 2 chiều của cùng
+    │   một giao dịch:
+    │   - Router A gửi LSR (1b2.A) → Router B nhận LSR (1b2.C)
+    │   - Router B gửi LSU (1b2.C) → Router A nhận LSU (1b2.B)
+    │   - Router A gửi LSAck (1b2.B) → Router B (bỏ qua trong Loading)
+    │
+    ├── rxmtTimer (1b2.A):
+    │   - Schedule khi bắt đầu Loading (gửi LSR lần đầu)
+    │   - Reset (cancel cũ + schedule mới) sau mỗi lần gửi LSR mới
+    │     (khi 1b2.B nhận LSU và list chưa rỗng → gửi LSR tiếp)
+    │   - Cancel khi LoadingDone (list rỗng → Full)
+    │   - Cháy → retransmit LSR → schedule lại
+    │   - Cancel khi neighbor state thay đổi khỏi Loading
+    │     (Full/ExStart/Down)
+    │
+    └── Các sự kiện hủy Loading (Section 10.3):
+        ├── BadLSReq (khi xử lý LSR 1b2.C) → ExStart
+        ├── SeqNumberMismatch (khi nhận DD sai) → ExStart
+        ├── 1-Way (Hello không thấy self) → Init
+        ├── InactivityTimer → Down
+        └── KillNbr / LLDown → Down
+        Tất cả đều: xóa 3 list (databaseSummary, request, retransmission)
+        + cancel rxmtTimer
+
+================================================================================
+CHI TIẾT: CẤU TRÚC DỮ LIỆU SỬ DỤNG (đã có sẵn trong ospf_struct.h)
+================================================================================
+
+NeighborData (dùng cho cả 1b1 và 1b2 — không thay đổi, P2P cấp phát tĩnh)
+├── state: OspfNeighborState (Loading=6, Full=7)
+├── linkStateRequestList: vector<LSAHeader>
+│   Danh sách LSA header còn thiếu so với neighbor.
+│   Được xây ở 1b1 (Exchange: DD → so sánh LSDB → add vào nếu thiếu).
+│   1b2: gửi LSR từ đầu list (giữ nguyên list để retransmit),
+│        truncate (xóa) các LSA đã nhận khi LSU đến.
+│   Khi list rỗng → LoadingDone → Full.
+├── linkStateRetransmissionList: vector<LSARequest>
+│   Dùng trong 1c (Flooding) để retransmit LSA chưa ACK.
+│   1b2 không ghi vào list này (Section 10.7: "should NOT be placed on
+│   the Link state retransmission list").
+├── rxmtTimer: cMessage*
+│   Chung với 1b1 (DD retransmit). 1b2 dùng cho LSR retransmit.
+│   Cancel khi kết thúc Loading.
+├── isMaster, ddSequenceNumber: Giữ nguyên từ 1b1 (cần cho duplicate DD
+│   detection trong Loading/Full — Section 10.6)
+├── lastDdOptions, lastDdIMs, optionsNeighbor: Như trên
+└── inactivityTimer: Chung với 1a
+
+linkStateRequestData (class xử lý LSR)
+├── requests: vector<LSARequest>
+├── sendLSR()  — gửi LSR (Section 10.9 + A.3.4)
+└── processLSR() — xử lý LSR nhận (Section 10.7), trả về LsrResult
+
+linkStateUpdateData (class xử lý LSU)
+├── numberOfLSA: uint32_t
+├── LSAs: vector<LSA>
+├── sendLSU()  — gửi LSU (Section 13)
+└── processLSU() — xử lý LSU nhận (Section 13), trả về LsuResult
+
+linkStateAcknowledgementData (class xử lý LSAck)
+├── data: vector<LSAHeader>
+├── sendLSAck() — gửi LSAck (Section 13.5)
+└── processLSAck() — xử lý LSAck nhận (Section 13.7) — dùng trong 1c
+
+LsrResult (struct kết quả processLSR)
+├── valid: bool (false → BadLSReq)
+├── badLSReq: bool (true → handleMessage xử lý state ExStart)
+└── lsus: vector<LSA> (các LSA cần gửi về, để handleMessage gọi sendLSU)
+
+LsuResult (struct kết quả processLSU)
+├── valid: bool (false → drop gói)
+├── loadingDone: bool (true → state = Full)
+├── lsasInstalled: int (số LSA mới cài vào LSDB)
+└── scheduleSPF: bool (true → schedule SPF calculation)
+
+================================================================================
+CẤU TRÚC XỬ LÝ TRONG handleMessage (Rule 8 pattern — mở rộng từ 1a+1b1)
+================================================================================
+
+handleMessage(msg)
+│
+├── [Tree] msg->isSelfMessage() ?
+│   │
+│   ├── TRUE → [Luồng timer] — giữ nguyên cấu trúc 1a + 1b1
+│   │   │
+│   │   ├── [Tree] msg == helloTimer?
+│   │   │   └── YES → GỬI HELLO + schedule helloTimer (1a, không đổi)
+│   │   │
+│   │   ├── [Tree] msg == rxmtTimer của neighbor nào?
+│   │   │   │
+│   │   │   └── YES → XỬ LÝ RETRANSMIT (1b2.A Kích hoạt 2)
+│   │   │       │
+│   │   │       └── [Tree] nbr->state?
+│   │   │           ├── == ExStart/Exchange → retransmit DD (1b1, không đổi)
+│   │   │           ├── == Loading → retransmit LSR (1b2)
+│   │   │           │   ├── Gửi lại LSR với các LSARequest đang outstanding
+│   │   │           │   └── schedule rxmtTimer tiếp
+│   │   │           └── khác → bỏ qua (cancel timer sau)
+│   │   │
+│   │   └── [Tree] msg == inactivityTimer?
+│   │       └── YES → neighbor Down + xóa 3 list (1a, không đổi)
+│   │
+│   └── FALSE → [Luồng gói tin]
+│       │
+│       ├── Parse header + data từ Mess (dùng OspfMess::parse)
+│       ├── [Tree] pktType?
+│       │   │
+│       │   ├── == 1 (Hello) → XỬ LÝ HELLO (1a, không đổi)
+│       │   │   └── Nếu 2Way + P2P → ExStart + gửi DD I+M+MS (1b1)
+│       │   │
+│       │   ├── == 2 (DD) → XỬ LÝ DD (1b1, không đổi về logic)
+│       │   │   └── processDD → nếu exchangeDone → Loading/Full (1b2 khởi động)
+│       │   │       │
+│       │   │       └── [exchangeDone handler — bổ sung 1b2]
+│       │   │           ├── Cancel rxmtTimer (DD timer)
+│       │   │           ├── [Tree] linkStateRequestList.empty()?
+│       │   │           │   ├── CÓ → state = Full
+│       │   │           │   └── KHÔNG → state = Loading
+│       │   │           │       └── Gửi LSR đầu tiên (gọi sendLSR)
+│       │   │           │       └── Schedule rxmtTimer mới (LSR timer)
+│       │   │           └── Log transition
+│       │   │
+│       │   ├── == 3 (LSR) → XỬ LÝ LINK STATE REQUEST (1b2.C)
+│       │   │   │
+│       │   │   ├── [Pre-check] nbr->state >= Exchange?
+│       │   │   │   ├── NO → delete msg (ignore)
+│       │   │   │   └── YES → tiếp
+│       │   │   │
+│       │   │   ├── Gọi processLSR(hdr, data, iface, routerLSAs)
+│       │   │   │   └── Trả về LsrResult
+│       │   │   │
+│       │   │   ├── [Tree] res.badLSReq?
+│       │   │   │   ├── YES → state = ExStart, xóa 3 list, restart
+│       │   │   │   │   (Section 10.7 + 10.3)
+│       │   │   │   │   ├── nbr->state = ExStart
+│       │   │   │   │   ├── Xóa databaseSummary, request, retransmission
+│       │   │   │   │   ├── ddSeq++, isMaster=1
+│       │   │   │   │   └── Gửi DD rỗng I+M+MS + schedule rxmtTimer
+│       │   │   │   │
+│       │   │   │   └── NO → gửi LSU response
+│       │   │   │       └── Gọi sendLSU(res.lsus, ifIndex)
+│       │   │   │
+│       │   │   └── delete msg
+│       │   │
+│       │   ├── == 4 (LSU) → XỬ LÝ LINK STATE UPDATE (1b2.B)
+│       │   │   │
+│       │   │   ├── [Pre-check] nbr->state >= Exchange?
+│       │   │   │   ├── NO → delete msg (drop)
+│       │   │   │   └── YES → tiếp
+│       │   │   │
+│       │   │   ├── Gọi processLSU(hdr, data, iface, area)
+│       │   │   │   └── Trả về LsuResult
+│       │   │   │   ⚠ processLSU validate từng LSA + cài vào LSDB
+│       │   │   │     (Section 13 steps 1-8)
+│       │   │   │     KHÔNG đụng timer — handleMessage lo
+│       │   │   │
+│       │   │   ├── [Tree] res.scheduleSPF?
+│       │   │   │   └── YES → schedule SPF (nếu có hàm SPF)
+│       │   │   │
+│       │   │   ├── [Tree] nbr->state == Loading AND res.loadingDone?
+│       │   │   │   │
+│       │   │   │   ├── YES → LoadingDone
+│       │   │   │   │   ├── nbr->state = Full
+│       │   │   │   │   ├── Cancel rxmtTimer
+│       │   │   │   │   ├── [TODO] 1c: originate Router-LSA + flood
+│       │   │   │   │   └── Log transition
+│       │   │   │   │
+│       │   │   │   └── NO → tiếp tục Loading
+│       │   │   │       └── [Tree] nbr->state == Loading?
+│       │   │   │           └── YES → gửi LSR tiếp (1b2.A)
+│       │   │   │               ├── Gọi sendLSR(nbr, ifIndex)
+│       │   │   │               └── Reset rxmtTimer (cancel cũ + schedule mới)
+│       │   │   │                   (Section 10.9: list còn item → send new LSR
+│       │   │   │                    + schedule retransmit timer)
+│       │   │   │
+│       │   │   ├── [Action] Gửi LSAck
+│       │   │   │   └── Gọi sendLSAck(res.lsaHeaders, ifIndex)
+│       │   │   │       ⚠ processLSU đã xác định LSA nào cần ACK
+│       │   │   │         (Section 13 (5e) + (7b))
+│       │   │   │
+│       │   │   └── delete msg
+│       │   │
+│       │   ├── == 5 (LSAck) → [TODO] 1c (Flooding acknowledgment)
+│       │   │   └── Trong 1b2: neighbor gửi LSAck, nhưng mình không cần
+│       │   │       xử lý đặc biệt (Section 10.7: không đặt LSU vào
+│       │   │       retransmission list → không cần ACK tracking)
+│       │   │       → delete msg (bỏ qua hoặc log)
+│       │   │
+│       │   └── [Luồng gói tin] KẾT THÚC: delete msg (nếu chưa delete)
+│       │       (Mỗi nhánh đã tự delete msg — đảm bảo không memory leak)
+
+================================================================================
+CHI TIẾT TỪNG HÀM (Rule 8 pattern)
+================================================================================
+
+[Flow] linkStateRequestData::sendLSR(nbr, ifIndex, routerId, mod)
+────────────────────────────────────────────────────────────────────
+Gửi Link State Request packet (Section 10.9 + A.3.4).
+KHÔNG đụng timer — handleMessage lo.
+
+│
+├── 1. Kiểm tra linkStateRequestList
+│   └── Nếu rỗng → không gửi (LoadingDone sẽ xảy ra qua exchangeDone path)
+│
+├── 2. Lấy các LSARequest từ đầu list
+│   └── Section 10.9: "sends the neighbor the beginning of the Link state
+│       request list, packaged in a Link State Request packet"
+│       ⚠ Có thể gửi nhiều request trong 1 LSR (tối đa phù hợp MTU,
+│         dự án bỏ qua MTU → có thể gửi tất cả trong 1 LSR)
+│       └── [Loop] Duyệt linkStateRequestList
+│           └── Mỗi phần tử → 1 LSARequest{ type, linkStateId, advRouter }
+│               └── put32(type), put32(linkStateId), put32(advRouter)
+│
+├── 3. Đóng gói LSR body: put32(type) + put32(linkStateId) + put32(advRouter)
+│       cho mỗi item từ đầu linkStateRequestList
+│       ⚠ KHÔNG xóa item khỏi linkStateRequestList ở bước này.
+│         Các item được giữ lại trong list để retransmit nếu cần.
+│         (Section 10.9: "LSAs on the Link state request list that have been
+│          requested, but not yet received, are packaged ... for retransmission
+│          at intervals of RxmtInterval")
+│         Chúng chỉ bị xóa (truncated) khi nhận được LSU — Section 10.9:
+│         "When the neighbor responds ... the Link state request list is truncated"
+│
+└── 4. OspfMess::send(3, body, routerId, 0, ifIndex, mod)
+
+
+[Flow] linkStateRequestData::processLSR(hdr, data, iface, routerLSAs)
+───────────────────────────────────────────────────────────────────────
+Xử lý Link State Request packet nhận được (Section 10.7 + A.3.4).
+KHÔNG đụng timer — handleMessage lo.
+Trả về LsrResult.
+
+│
+├── 1. Parse LSR body
+│   └── [Loop] Đọc đến hết data
+│       └── Mỗi lần: get32 → LS type, get32 → linkStateId, get32 → advRouter
+│           → 1 LSARequest
+│
+├── 2. [Loop] Với mỗi LSARequest:
+│   ├── Tra LSDB: tìm trong routerLSAs[]
+│   │   └── So khớp (type == 1, linkStateId == id, advertisingRouter == advR)
+│   │       │
+│   │       ├── [Tree] Tìm thấy?
+│   │       │   ├── CÓ → copy LSA vào result.lsus
+│   │       │   └── KHÔNG → result.badLSReq = true → return result NGAY
+│   │       │       (Section 10.7: "If an LSA cannot be found ... BadLSReq")
+│   │       │       ⚠ Dừng xử lý ngay khi gặp lỗi đầu tiên (Section 10.7)
+│   │
+│   ├── [note] LS type validation:
+│   │   Dự án chỉ có type=1 (Router-LSA). Nếu request type khác → BadLSReq
+│   │   (Section 10.7: "Each LSA specified ... should be located")
+│   │
+│   └── [note] Section 10.7: "These LSAs should NOT be placed on the
+│       Link state retransmission list"
+│       → Không thêm vào linkStateRetransmissionList
+│
+└── 3. result.valid = !result.badLSReq → return result
+
+
+[Flow] linkStateUpdateData::processLSU(hdr, data, iface, area)
+────────────────────────────────────────────────────────────────
+Xử lý Link State Update packet nhận được (Section 13 steps 1-8).
+KHÔNG đụng timer — handleMessage lo.
+Trả về LsuResult.
+
+│
+├── 1. Parse LSU body (Section A.3.5)
+│   ├── get32 → numberOfLSAs
+│   └── [Loop] numberOfLSAs lần:
+│       └── Parse 1 LSA: header (20 byte) + body (phụ thuộc length)
+│           ├── get16 → age, get8 → options, get8 → type
+│           ├── get32 → linkStateId, get32 → advertisingRouter
+│           ├── get32 → sequenceNumber, get16 → checksum, get16 → length
+│           ├── Đọc body = còn lại length-20 byte
+│           │   └── type 1 (Router-LSA):
+│           │       ├── get8 → flags, get8 → zero, get16 → numLinks
+│           │       └── [Loop] numLinks lần:
+│           │           ├── get32 → linkID, get32 → linkData
+│           │           ├── get8 → type, get8 → numTOS, get16 → metric
+│           │           └── [Loop] numTOS lần: get8 → tos, get8 → zero,
+│           │               get16 → tosMetric
+│           └── Lưu vào vector<LSA> lsas
+│
+├── 2. [Loop] Với mỗi LSA trong lsas — Section 13 steps (1)-(8)
+│   │
+│   ├── (1) Validate LS checksum (Section 13)
+│   │   └── Dự án bỏ qua → luôn pass
+│   │
+│   ├── (2) LS type unknown?
+│   │   └── type==1 (Router-LSA) → pass. type khác → discard + continue
+│   │
+│   ├── (3) AS-external-LSA trong stub?
+│   │   └── Area backbone, non-stub → luôn pass
+│   │
+│   ├── (4) MaxAge + no DB copy + no neighbor Exchange/Loading?
+│   │   └── age=MaxAge? AND db lookup == null AND no neighbor ≥ Exchange?
+│   │       → add to result.ackHeaders + discard + continue
+│   │       (Dự án LSA mới, age=0 → không vào case này)
+│   │
+│   ├── (5) DB không có hoặc received newer:
+│   │   └── DB copy == null OR isNewer(received, dbCopy)
+│   │       │
+│   │       ├── (5a) MinLSArrival check — dự án bỏ qua
+│   │       ├── (5b) Flood ra neighbor ≥ Exchange (gọi floodLSA)
+│   │       ├── (5c) Xóa DB copy cũ khỏi retransmission lists
+│   │       ├── (5d) Install into LSDB:
+│   │       │   ├── Tìm trong area.routerLSAs[] (so advRouter)
+│   │       │   ├── Đã có? → replace (xóa cũ, push mới)
+│   │       │   ├── Chưa có? → push vào area.routerLSAs
+│   │       │   └── result.lsasInstalled++, result.scheduleSPF = true
+│   │       ├── (5e) ACK: add LSA header vào result.ackHeaders
+│   │       ├── (5f) Self-originated? — dự án bỏ qua (xử lý sau)
+│   │       │
+│   │       └── [ACTION SPECIFIC TO LOADING] Xóa LSA khỏi
+│   │           linkStateRequestList nếu có
+│   │           └── (Chỉ khi LSA này đang trong request list)
+│   │
+│   │   └── (6) DB tồn tại, received không mới hơn (cũ/bằng),
+│   │       VÀ LSA còn trong linkStateRequestList của sending neighbor?
+│   │       → result.badLSReq = true → dừng xử lý LSU ngay
+│   │       (Section 13 (6): "an error has occurred in the Database
+│   │        Exchange process")
+│   │       ⚠ Ở đây không cần phân biệt "cũ hơn" hay "bằng nhau".
+│   │         Nếu neighbor đã gửi LSA mà request list của nó vẫn còn LSA đó,
+│   │         tức là neighbor mong muốn nhận bản mới hơn từ ta → có lỗi.
+│   │
+│   │   └── (7) Same instance (duplicate — so sánh seqNum + checksum)
+│   │       (Section 13 (7))
+│   │       ├── (7a) Trong retransmission list của sending neighbor?
+│   │       │   └── CÓ → implicit ACK: xóa khỏi list
+│   │       └── (7b) ACK: add header vào result.ackHeaders
+│   │
+│   │   └── (8) DB copy mới hơn received (còn lại)
+│   │       (Section 13 (8))
+│   │       └── Gửi DB copy về neighbor (thêm vào lsusToSend)
+│   │           (Section 13: "send the database copy back",
+│   │            không vào retransmission list, không ACK)
+│   │
+├── 3. result.loadingDone = linkStateRequestList.empty()
+│   └── (Chỉ set khi nhánh gọi là neighbor đang Loading)
+│
+└── 4. Return result
+
+
+[Flow] linkStateAcknowledgementData::sendLSAck(headers, ifIndex, routerId, mod)
+────────────────────────────────────────────────────────────────────────────────
+Gửi Link State Acknowledgment packet (Section 13.5 + A.3.6).
+
+│
+├── 1. Xây LSAck body: tất cả LSA header cần ACK
+│   └── [Loop] Với mỗi LSAHeader trong ackHeaders:
+│       └── put16(age), put8(options), put8(type), put32(linkStateId),
+│           put32(advertisingRouter), put32(sequenceNumber),
+│           put16(checksum), put16(length)
+│
+└── 2. OspfMess::send(5, body, routerId, 0, ifIndex, mod)
+
+================================================================================
+LƯU Ý QUAN TRỌNG VỀ LOOP VÀ ĐIỀU KIỆN KẾT THÚC
+================================================================================
+
+1. **Vòng lặp gửi LSR (1b2.A Kích hoạt 1):**
+   - Mỗi lần gửi LSR: lấy đầu linkStateRequestList → gửi (giữ nguyên list)
+   - Mỗi lần nhận LSU: truncate list — xóa các LSA đã nhận khỏi list
+     (Section 10.9: "the Link state request list is truncated")
+   - → list chỉ ngắn đi khi nhận được LSU
+   - Điều kiện kết thúc: linkStateRequestList.empty() → LoadingDone → Full
+   - ⚠ Section 10.9: "at most one Link State Request packet outstanding"
+     → KHÔNG gửi LSR mới nếu chưa nhận LSU cho LSR trước
+
+2. **Retransmit loop (1b2.A Kích hoạt 2 — rxmtTimer):**
+   - Loading: retransmit LSR mỗi RxmtInterval nếu chưa nhận LSU
+   - Điều kiện kết thúc: nhận được LSU (1b2.B cancel timer)
+     HOẶC neighbor state thay đổi (không còn Loading)
+
+3. **Loop xử lý LSA trong LSU (1b2.B):**
+   - Mỗi LSU có thể chứa nhiều LSA (Section 13)
+   - Duyệt từng LSA → validate → so DB → install/ACK/discard
+   - Điều kiện kết thúc: hết số LSA trong LSU packet
+
+4. **Loop xử lý LSR request items (1b2.C):**
+   - Mỗi LSR có thể chứa nhiều LSARequest
+   - Duyệt từng request → tra DB → copy vào LSU body
+   - Điều kiện kết thúc: hết số requests trong LSR
+     HOẶC gặp lỗi (BadLSReq → dừng ngay, Section 10.7)
+
+5. **Song song giữa các neighbor:**
+   - Mỗi interface P2P có 1 neighbor riêng, mỗi neighbor có thể
+     đang ở Loading state độc lập
+   - 1b2.A/B/C chạy song song cho mỗi neighbor
+   - Không có xung đột vì mỗi bộ linkStateRequestList là riêng
+
+================================================================================
+ĐẦU RA MONG ĐỢI SAU KHI 1b2 HOÀN TẤT
+================================================================================
+
+1b2 hoạt động per-adjacency (mỗi neighbor độc lập).
+1b2 kết thúc trên từng adjacency khi neighbor chuyển sang Full(7).
+Có 2 kịch bản:
+
+  **Kịch bản A: linkStateRequestList rỗng ngay từ ExchangeDone**
+    → Không vào Loading → Full ngay (1b1 kết thúc ở trạng thái Full)
+    (Trường hợp LSDB 2 bên đồng bộ hoàn toàn — không thiếu LSA nào)
+
+  **Kịch bản B: linkStateRequestList không rỗng → Loading → Full**
+    → 1b2 chạy: gửi LSR → nhận LSU → cài LSDB → Full
+
+┌──────────────────────────────────────────────────────────────────────────────┐
+│              KẾT QUẢ 1b2 — Loading                                          │
+├───────────────────────────────────────┬──────────────────────────────────────┤
+│ Thành phần                            │ Giá trị                             │
+├───────────────────────────────────────┼──────────────────────────────────────┤
+│ Interface.state                       │ PointToPoint (3) — không đổi         │
+│ Neighbor.state                        │ Full (7)                            │
+│ Neighbor.isMaster                     │ Giữ nguyên từ 1b1 — không đổi       │
+│ Neighbor.ddSequenceNumber             │ Giữ nguyên (chỉ dùng cho DD         │
+│                                       │ duplicate detection trong Full)      │
+├───────────────────────────────────────┼──────────────────────────────────────┤
+│ Neighbor.databaseSummaryList          │ Đã clear (hoặc không dùng nữa)       │
+│ Neighbor.linkStateRequestList         │ RỖNG (đã được xóa toàn bộ)          │
+│ Neighbor.linkStateRetransmissionList  │ Rỗng (chưa dùng — chờ 1c)           │
+├───────────────────────────────────────┼──────────────────────────────────────┤
+│ rxmtTimer (per neighbor)              │ Đã cancel                            │
+│ inactivityTimer                        │ Đang chạy (reset mỗi Hello)         │
+├───────────────────────────────────────┼──────────────────────────────────────┤
+│ LSDB (area.routerLSAs)                │ ĐÃ CÓ THÊM LSA MỚI                  │
+│                                       │ (các LSA kéo về từ neighbor)         │
+│                                       │ — CỦA CÁC ROUTER ĐÃ ĐỒNG BỘ          │
+│                                       │   TRỰC TIẾP (chưa flood toàn area)   │
+│                                       │ — NHƯNG CHỈ CÓ STUB LINKS            │
+│                                       │ (chưa có P2P links vì chưa originate)│
+├───────────────────────────────────────┼──────────────────────────────────────┤
+│ RoutingTable                          │ RỖNG (chưa SPF)                     │
+│ SPF vertices                          │ RỖNG (chưa tính)                    │
+└───────────────────────────────────────┴──────────────────────────────────────┘
+
+Ví dụ với mạng 4 router (tiếp nối từ 1b1):
+         R1 ─── R2
+          \    /
+           R4
+           │
+           R6
+
+LSDB TRƯỚC 1b2 (sau 1b1, trước Loading):
+  R1: { LSA-R1(stub) }             ← chỉ có LSA của self
+  R2: { LSA-R2(stub) }             ← chỉ có LSA của self
+  R4: { LSA-R4(stub) }             ← chỉ có LSA của self
+  R6: { LSA-R6(stub) }             ← chỉ có LSA của self
+
+linkStateRequestList (sau ExchangeDone — mỗi neighbor biết LSA nào thiếu):
+  Trên R1:
+    neighbor R2: requestList = [LSA-R2]    (thiếu LSA của R2)
+    neighbor R4: requestList = [LSA-R4]    (thiếu LSA của R4)
+  Trên R2:
+    neighbor R1: requestList = [LSA-R1]    (thiếu LSA của R1)
+    neighbor R4: requestList = [LSA-R4]    (thiếu LSA của R4)
+  Trên R4:
+    neighbor R1: requestList = [LSA-R1]    (thiếu LSA của R1)
+    neighbor R2: requestList = [LSA-R2]    (thiếu LSA của R2)
+    neighbor R6: requestList = [LSA-R6]    (thiếu LSA của R6)
+  Trên R6:
+    neighbor R4: requestList = [LSA-R4]    (thiếu LSA của R4)
+
+Loading trên R1 (với neighbor R2 và R4):
+  ┌─────────────────────────────────────────────────────────────────┐
+  │ R1→R2: gửi LSR{ LStype=1, linkStateId=R2, advRouter=R2 }      │
+  │ R2→R1: gửi LSU{ LSA-R2(stub) }                                 │
+  │ R1: cài LSA-R2 vào LSDB, gửi LSAck                             │
+  │ R1→R2: linkStateRequestList rỗng → LoadingDone → Full(R2)      │
+  │                                                                  │
+  │ R1→R4: gửi LSR{ LStype=1, linkStateId=R4, advRouter=R4 }      │
+  │ R4→R1: gửi LSU{ LSA-R4(stub) }                                 │
+  │ R1: cài LSA-R4 vào LSDB, gửi LSAck                             │
+  │ R1→R4: linkStateRequestList rỗng → LoadingDone → Full(R4)      │
+  └─────────────────────────────────────────────────────────────────┘
+
+LSDB SAU 1b2 (tất cả neighbor Full, nhưng CHỈ stub links):
+  R1: { LSA-R1(stub), LSA-R2(stub), LSA-R4(stub) }
+  R2: { LSA-R1(stub), LSA-R2(stub), LSA-R4(stub) }
+  R4: { LSA-R1(stub), LSA-R2(stub), LSA-R4(stub), LSA-R6(stub) }
+  R6: { LSA-R4(stub), LSA-R6(stub) }
+
+  ⚠ LƯU Ý: LSDB vẫn CHỈ có stub links. P2P links chỉ xuất hiện
+    sau 1c (originate lại Router-LSA khi có neighbor Full).
+    → R1 chưa biết R2-R4 kết nối thế nào, R6 chưa biết R1 và R2.
+    → SPF chưa thể tính đúng (thiếu cạnh P2P).
+    → Chỉ sau 1c (originate + flood) LSDB mới đồng bộ hoàn toàn.
+
+Điều kiện để chuyển sang 1c (Originate + Flood):
+  - Có ít nhất 1 neighbor Full(7) — originate Router-LSA để thêm P2P links
+  - (Section 12.4 Event (4): "One of the neighboring routers changes to/from
+    the FULL state. This may mean that it is necessary to produce a new
+    instance of the router-LSA.")
+  - ⚠ Không cần đợi tất cả neighbor Full. Mỗi lần có neighbor chuyển Full
+    là một lần originate (có thể bị MinLSInterval giới hạn tần suất).
