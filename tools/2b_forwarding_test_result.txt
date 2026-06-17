@@ -1,0 +1,337 @@
+============================================================
+  2b — FORWARDING TEST RESULTS
+============================================================
+
+  Simulation: General, t=11.1 (sau SPF hoàn tất)
+
+─── OVERALL ───
+  Packets sent:      90
+  Packets received:  90
+  Errors (drop):     0
+  Forward actions:   210
+  PASS rate:         100% (90/90)
+
+─── PER ROUTER ───
+  R1: sent=9, received=9  ✅
+  R2: sent=9, received=9  ✅
+  R3: sent=9, received=9  ✅
+  R4: sent=9, received=9  ✅
+  R5: sent=9, received=9  ✅
+  R6: sent=9, received=9  ✅
+  R7: sent=9, received=9  ✅
+  R8: sent=9, received=9  ✅
+  R9: sent=9, received=9  ✅
+  R10: sent=9, received=9  ✅
+
+─── COST DISTRIBUTION ───
+  cost=1: 24 packets  ████████████
+  cost=2: 30 packets  ███████████████
+  cost=3: 22 packets  ███████████
+  cost=4: 10 packets  █████
+  cost=5: 4 packets  ██
+
+============================================================
+  CHI TIẾT 90 ĐƯỜNG ĐI
+============================================================
+
+  ─── R1 gửi ───
+  T#  1  R1 → R2
+         Path: R1 → R2  cost=1
+
+  T#  2  R1 → R3
+         Path: R1 → R2 → R3  cost=2
+
+  T#  3  R1 → R4
+         Path: R1 → R4  cost=1
+
+  T#  4  R1 → R5
+         Path: R1 → R2 → R5  cost=2
+
+  T#  5  R1 → R6
+         Path: R1 → R4 → R6  cost=2
+
+  T#  6  R1 → R7
+         Path: R1 → R2 → R5 → R7  cost=3
+
+  T#  7  R1 → R8
+         Path: R1 → R2 → R3 → R8  cost=3
+
+  T#  8  R1 → R9
+         Path: R1 → R2 → R3 → R9  cost=3
+
+  T#  9  R1 → R10
+         Path: R1 → R2 → R3 → R8 → R10  cost=4
+
+
+  ─── R2 gửi ───
+  T# 10  R2 → R1
+         Path: R2 → R1  cost=1
+
+  T# 11  R2 → R3
+         Path: R2 → R3  cost=1
+
+  T# 12  R2 → R4
+         Path: R2 → R4  cost=1
+
+  T# 13  R2 → R5
+         Path: R2 → R5  cost=1
+
+  T# 14  R2 → R6
+         Path: R2 → R4 → R6  cost=2
+
+  T# 15  R2 → R7
+         Path: R2 → R5 → R7  cost=2
+
+  T# 16  R2 → R8
+         Path: R2 → R3 → R8  cost=2
+
+  T# 17  R2 → R9
+         Path: R2 → R3 → R9  cost=2
+
+  T# 18  R2 → R10
+         Path: R2 → R3 → R8 → R10  cost=3
+
+
+  ─── R3 gửi ───
+  T# 19  R3 → R1
+         Path: R3 → R2 → R1  cost=2
+
+  T# 20  R3 → R2
+         Path: R3 → R2  cost=1
+
+  T# 21  R3 → R4
+         Path: R3 → R2 → R4  cost=2
+
+  T# 22  R3 → R5
+         Path: R3 → R2 → R5  cost=2
+
+  T# 23  R3 → R6
+         Path: R3 → R2 → R4 → R6  cost=3
+
+  T# 24  R3 → R7
+         Path: R3 → R2 → R5 → R7  cost=3
+
+  T# 25  R3 → R8
+         Path: R3 → R8  cost=1
+
+  T# 26  R3 → R9
+         Path: R3 → R9  cost=1
+
+  T# 27  R3 → R10
+         Path: R3 → R8 → R10  cost=2
+
+
+  ─── R4 gửi ───
+  T# 28  R4 → R1
+         Path: R4 → R1  cost=1
+
+  T# 29  R4 → R2
+         Path: R4 → R2  cost=1
+
+  T# 30  R4 → R3
+         Path: R4 → R2 → R3  cost=2
+
+  T# 31  R4 → R5
+         Path: R4 → R5  cost=1
+
+  T# 32  R4 → R6
+         Path: R4 → R6  cost=1
+
+  T# 33  R4 → R7
+         Path: R4 → R5 → R7  cost=2
+
+  T# 34  R4 → R8
+         Path: R4 → R2 → R3 → R8  cost=3
+
+  T# 35  R4 → R9
+         Path: R4 → R5 → R9  cost=2
+
+  T# 36  R4 → R10
+         Path: R4 → R2 → R3 → R8 → R10  cost=4
+
+
+  ─── R5 gửi ───
+  T# 37  R5 → R1
+         Path: R5 → R2 → R1  cost=2
+
+  T# 38  R5 → R2
+         Path: R5 → R2  cost=1
+
+  T# 39  R5 → R3
+         Path: R5 → R2 → R3  cost=2
+
+  T# 40  R5 → R4
+         Path: R5 → R4  cost=1
+
+  T# 41  R5 → R6
+         Path: R5 → R4 → R6  cost=2
+
+  T# 42  R5 → R7
+         Path: R5 → R7  cost=1
+
+  T# 43  R5 → R8
+         Path: R5 → R2 → R3 → R8  cost=3
+
+  T# 44  R5 → R9
+         Path: R5 → R9  cost=1
+
+  T# 45  R5 → R10
+         Path: R5 → R2 → R3 → R8 → R10  cost=4
+
+
+  ─── R6 gửi ───
+  T# 46  R6 → R1
+         Path: R6 → R4 → R1  cost=2
+
+  T# 47  R6 → R2
+         Path: R6 → R4 → R2  cost=2
+
+  T# 48  R6 → R3
+         Path: R6 → R4 → R2 → R3  cost=3
+
+  T# 49  R6 → R4
+         Path: R6 → R4  cost=1
+
+  T# 50  R6 → R5
+         Path: R6 → R4 → R5  cost=2
+
+  T# 51  R6 → R7
+         Path: R6 → R4 → R5 → R7  cost=3
+
+  T# 52  R6 → R8
+         Path: R6 → R4 → R2 → R3 → R8  cost=4
+
+  T# 53  R6 → R9
+         Path: R6 → R4 → R5 → R9  cost=3
+
+  T# 54  R6 → R10
+         Path: R6 → R4 → R2 → R3 → R8 → R10  cost=5
+
+
+  ─── R7 gửi ───
+  T# 55  R7 → R1
+         Path: R7 → R5 → R2 → R1  cost=3
+
+  T# 56  R7 → R2
+         Path: R7 → R5 → R2  cost=2
+
+  T# 57  R7 → R3
+         Path: R7 → R5 → R2 → R3  cost=3
+
+  T# 58  R7 → R4
+         Path: R7 → R5 → R4  cost=2
+
+  T# 59  R7 → R5
+         Path: R7 → R5  cost=1
+
+  T# 60  R7 → R6
+         Path: R7 → R5 → R4 → R6  cost=3
+
+  T# 61  R7 → R8
+         Path: R7 → R5 → R2 → R3 → R8  cost=4
+
+  T# 62  R7 → R9
+         Path: R7 → R5 → R9  cost=2
+
+  T# 63  R7 → R10
+         Path: R7 → R5 → R2 → R3 → R8 → R10  cost=5
+
+
+  ─── R8 gửi ───
+  T# 64  R8 → R1
+         Path: R8 → R3 → R2 → R1  cost=3
+
+  T# 65  R8 → R2
+         Path: R8 → R3 → R2  cost=2
+
+  T# 66  R8 → R3
+         Path: R8 → R3  cost=1
+
+  T# 67  R8 → R4
+         Path: R8 → R3 → R2 → R4  cost=3
+
+  T# 68  R8 → R5
+         Path: R8 → R3 → R2 → R5  cost=3
+
+  T# 69  R8 → R6
+         Path: R8 → R3 → R2 → R4 → R6  cost=4
+
+  T# 70  R8 → R7
+         Path: R8 → R3 → R2 → R5 → R7  cost=4
+
+  T# 71  R8 → R9
+         Path: R8 → R3 → R9  cost=2
+
+  T# 72  R8 → R10
+         Path: R8 → R10  cost=1
+
+
+  ─── R9 gửi ───
+  T# 73  R9 → R1
+         Path: R9 → R3 → R2 → R1  cost=3
+
+  T# 74  R9 → R2
+         Path: R9 → R3 → R2  cost=2
+
+  T# 75  R9 → R3
+         Path: R9 → R3  cost=1
+
+  T# 76  R9 → R4
+         Path: R9 → R5 → R4  cost=2
+
+  T# 77  R9 → R5
+         Path: R9 → R5  cost=1
+
+  T# 78  R9 → R6
+         Path: R9 → R5 → R4 → R6  cost=3
+
+  T# 79  R9 → R7
+         Path: R9 → R5 → R7  cost=2
+
+  T# 80  R9 → R8
+         Path: R9 → R3 → R8  cost=2
+
+  T# 81  R9 → R10
+         Path: R9 → R3 → R8 → R10  cost=3
+
+
+  ─── R10 gửi ───
+  T# 82  R10 → R1
+         Path: R10 → R8 → R3 → R2 → R1  cost=4
+
+  T# 83  R10 → R2
+         Path: R10 → R8 → R3 → R2  cost=3
+
+  T# 84  R10 → R3
+         Path: R10 → R8 → R3  cost=2
+
+  T# 85  R10 → R4
+         Path: R10 → R8 → R3 → R2 → R4  cost=4
+
+  T# 86  R10 → R5
+         Path: R10 → R8 → R3 → R2 → R5  cost=4
+
+  T# 87  R10 → R6
+         Path: R10 → R8 → R3 → R2 → R4 → R6  cost=5
+
+  T# 88  R10 → R7
+         Path: R10 → R8 → R3 → R2 → R5 → R7  cost=5
+
+  T# 89  R10 → R8
+         Path: R10 → R8  cost=1
+
+  T# 90  R10 → R9
+         Path: R10 → R8 → R3 → R9  cost=3
+
+─── FORWARD STATS ───
+  R1: forwarded 9 packets (gate indices: 0, 1)
+  R2: forwarded 45 packets (gate indices: 0, 1, 2, 3)
+  R3: forwarded 41 packets (gate indices: 0, 1, 2)
+  R4: forwarded 25 packets (gate indices: 0, 1, 2, 3)
+  R5: forwarded 29 packets (gate indices: 0, 1, 2, 3)
+  R6: forwarded 9 packets (gate indices: 0)
+  R7: forwarded 9 packets (gate indices: 0)
+  R8: forwarded 25 packets (gate indices: 0, 1)
+  R9: forwarded 9 packets (gate indices: 0, 1)
+  R10: forwarded 9 packets (gate indices: 0)
+

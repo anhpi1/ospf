@@ -1,0 +1,152 @@
+=======================================================
+  Router R1  (state_dump/13.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R2       1      R2       intra
+  R3       2      R2       intra
+  R4       1      R4       intra
+  R5       2      R2       intra
+  R6       2      R4       intra
+  R7       3      R2       intra
+  R8       3      R2       intra
+  R9       3      R2       intra
+  R10      4      R2       intra
+
+=======================================================
+  Router R2  (state_dump/14.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       1      R1       intra
+  R3       1      R3       intra
+  R4       1      R4       intra
+  R5       1      R5       intra
+  R6       2      R4       intra
+  R7       2      R5       intra
+  R8       2      R3       intra
+  R9       2      R3       intra
+  R10      3      R3       intra
+
+=======================================================
+  Router R3  (state_dump/15.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       2      R2       intra
+  R2       1      R2       intra
+  R4       2      R2       intra
+  R5       2      R2       intra
+  R6       3      R2       intra
+  R7       3      R2       intra
+  R8       1      R8       intra
+  R9       1      R9       intra
+  R10      2      R8       intra
+
+=======================================================
+  Router R4  (state_dump/16.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       1      R1       intra
+  R2       1      R2       intra
+  R3       2      R2       intra
+  R5       1      R5       intra
+  R6       1      R6       intra
+  R7       2      R5       intra
+  R8       3      R2       intra
+  R9       2      R5       intra
+  R10      4      R2       intra
+
+=======================================================
+  Router R5  (state_dump/17.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       2      R2       intra
+  R2       1      R2       intra
+  R3       2      R2       intra
+  R4       1      R4       intra
+  R6       2      R4       intra
+  R7       1      R7       intra
+  R8       3      R2       intra
+  R9       1      R9       intra
+  R10      4      R2       intra
+
+=======================================================
+  Router R6  (state_dump/18.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       2      R4       intra
+  R2       2      R4       intra
+  R3       3      R4       intra
+  R4       1      R4       intra
+  R5       2      R4       intra
+  R7       3      R4       intra
+  R8       4      R4       intra
+  R9       3      R4       intra
+  R10      5      R4       intra
+
+=======================================================
+  Router R7  (state_dump/19.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       3      R5       intra
+  R2       2      R5       intra
+  R3       3      R5       intra
+  R4       2      R5       intra
+  R5       1      R5       intra
+  R6       3      R5       intra
+  R8       4      R5       intra
+  R9       2      R5       intra
+  R10      5      R5       intra
+
+=======================================================
+  Router R8  (state_dump/20.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       3      R3       intra
+  R2       2      R3       intra
+  R3       1      R3       intra
+  R4       3      R3       intra
+  R5       3      R3       intra
+  R6       4      R3       intra
+  R7       4      R3       intra
+  R9       2      R3       intra
+  R10      1      R10      intra
+
+=======================================================
+  Router R9  (state_dump/21.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       3      R3       intra
+  R2       2      R3       intra
+  R3       1      R3       intra
+  R4       2      R5       intra
+  R5       1      R5       intra
+  R6       3      R5       intra
+  R7       2      R5       intra
+  R8       2      R3       intra
+  R10      3      R3       intra
+
+=======================================================
+  Router R10  (state_dump/22.log)
+=======================================================
+  Đích     Cost   NextHop  Path  
+  ──────── ────── ──────── ──────
+  R1       4      R8       intra
+  R2       3      R8       intra
+  R3       2      R8       intra
+  R4       4      R8       intra
+  R5       4      R8       intra
+  R6       5      R8       intra
+  R7       5      R8       intra
+  R8       1      R8       intra
+  R9       3      R8       intra
+
+───────────────────────────────────────────────────────
+  Tổng: 10 router, 90 routing entries

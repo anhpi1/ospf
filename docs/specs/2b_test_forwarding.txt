@@ -1,0 +1,542 @@
+================================================================================
+2b — TEST FORWARDING (Kiểm tra chuyển tiếp gói dữ liệu)
+  RFC 2328 Section 11 (The Routing Table Structure)
+  11.1 (Routing table lookup)
+  16 (Calculation of the routing table)
+  16.8 (Equal-cost multipath)
+================================================================================
+
+Mục tiêu: Với routing table đã có từ Phase 2a, kiểm tra khả năng forward
+  gói dữ liệu giữa mọi cặp router trong mạng.
+  - Mỗi router gửi 1 data packet đến 9 router còn lại
+  - Mỗi gói tin được forward qua từng chặng theo routing table
+  - Verify: packet đến đúng đích, cost khớp với routing table
+  - 10 router × 9 đích = 90 test cases
+
+Lưu ý scope dự án (tra trong docs/plan thinking/):
+  - P2P only → forward ra gate index, không cần next-hop IP
+  - Single-area → routing table chỉ có intra-area routes
+  - Router-ID là 32-bit integer (1-10), dùng làm destination ID và source ID trong data packet
+  - Không có client module riêng — router tự sinh test packet (self-message)
+  - RoutingTableEntry.nextHop là Router ID (uint32_t), không phải IP
+  - Khi nextHop == 0 → không tìm thấy route (unreachable)
+  - Topology mesh 10 router, link cost random 1-30
+  - ⚠ Giá trị INFINITY cho nextHop: dùng UINT_MAX (calcNextHop trả về UINT_MAX khi không
+    tìm thấy). nextHop == 0 KHÔNG phải INFINITY, 0 là Router ID không dùng (1-10).
+
+================================================================================
+CẤU TRÚC TỔNG QUAN (dạng tree)
+================================================================================
+
+2b: TEST FORWARDING
+│
+├── [Tiền đề] Điều kiện cần trước khi chạy test
+│   ├── SPF đã chạy thành công (Phase 2a hoàn tất)
+│   ├── RoutingTable[] có đủ entry cho mọi router trong mạng
+│   ├── Mỗi router biết được:
+│   │   ├── Danh sách tất cả router ID trong mạng (từ LSDB)
+│   │   └── RoutingTableEntry cho mỗi router ≠ self
+│   └── Cấu trúc dữ liệu tái sử dụng:
+│       ├── RoutingTableEntry (đã có) — destinationId, cost, nextHop
+│       ├── InterfaceData (đã có) — neighbor.IDNeighbor map interface→router
+│       └── Mess (đã có) — class message có payload byte array
+│
+├── [Flow] FORWARD DATA — xử lý data packet đến (Section 11.1)
+│   └── Điều kiện kích hoạt: nhận được gói tin data (không phải OSPF type 1-5)
+│       │
+│       ├── B1: Nhận diện data packet
+│       │   ├── [Tree] Message đến từ local (self-message) hoặc từ gate
+│       │   │   ├── Self-message → đó là test packet khởi tạo từ router này
+│       │   │   └── Từ gate → cần parse destination từ payload
+│       │   │
+│       │   ├── Parse destination ID và source ID từ Mess.payload
+│       │   │   ├── destination = (payload[0] << 24) | (payload[1] << 16) |
+│       │   │   │                 (payload[2] << 8) | payload[3]
+│       │   │   │               (bytes 0-3: destination Router ID)
+│       │   │   └── sourceId = (payload[4] << 24) | (payload[5] << 16) |
+│       │   │                   (payload[6] << 8) | payload[7]
+│       │   │                 (bytes 4-7: source Router ID — giữ nguyên từ nguồn)
+│       │   │
+│       │   └── [Kiểm tra] destination == routerId của chính mình?
+│       │       ├── YES → gói tin đã đến đích → ghi log + delete
+│       │       └── NO → tiếp tục forward (xuống B2)
+│       │
+│       ├── B2: Routing table lookup (Section 11.1)
+│       │   │
+│       │   ├── Duyệt RoutingTable[] tìm entry có destinationId == destination
+│       │   │   │
+│       │   │   ├── [Tree] Tìm thấy?
+│       │   │   │   ├── CÓ → entry.nextHop cho biết Router ID của hop kế
+│       │   │   │   └── KHÔNG → DROP gói (unreachable, Section 11.1)
+│       │   │   │       └── [Action] delete msg; ghi log "unreachable"
+│       │   │   │
+│       │   │   └── [Ghi chú] Trong P2P single-area, mọi router đều reachable
+│       │   │       nếu SPF tính đúng. "Không tìm thấy" = lỗi cần debug.
+│       │   │
+│       │   └── [Tree] Có tìm thấy entry hợp lệ?
+│       │       │
+│       │       └── YES → B3
+│       │
+│       ├── B3: Xác định gate output từ nextHop Router ID
+│       │   │
+│       │   ├── Duyệt interfaces[] tìm i sao cho
+│       │   │   interfaces[i].neighbor.IDNeighbor == entry.nextHop
+│       │   │   │
+│       │   │   ├── [Tree] Tìm thấy interface?
+│       │   │   │   ├── CÓ → i = gate index để forward
+│       │   │   │   └── KHÔNG → DROP (lỗi, nextHop không kết nối trực tiếp)
+│       │   │   │
+│       │   │   └── [Ghi chú] nextHop trong routing table là đúng neighbor
+│       │   │       trực tiếp (P2P) — luôn phải tìm được interface
+│       │   │
+│       │   └── Có gate index → B4
+│       │
+│       └── B4: Forward gói tin
+│           │
+│           ├── [Action] send(msg, "gate$o", i)
+│           │   └── Gửi qua output gate i (P2P)
+│           │
+│           └── [Action] Ghi log — bao gồm sourceId, dest, gate
+│               └── state->logTransition("2b", "Forward: srcId→dest via gate[i]→nextHopId",
+│                   simTime().dbl(), ifIndex)
+│
+├── [Flow] KHỞI TẠO TEST — sinh 90 data packet (Phase 2b entry point)
+│   └── Điều kiện kích hoạt: sau khi SPF đã chạy xong lần cuối
+│       (có thể kích hoạt bằng 1 self-message "initForwardingTest" từ initialize
+│        sau 1 khoảng delay đủ để SPF hoàn tất)
+│       │
+│       ├── [Loop] SINH 9 TEST PACKET (1 router → 9 đích khác)
+│       │   │
+│       │   └── Điều kiện lặp: còn destination Router ID chưa gửi
+│       │       Điều kiện kết thúc: đã gửi đến cả 9 router còn lại
+│       │       │
+│       │       ├── Chọn destination Router ID kế tiếp (từ 1..10, ≠ self)
+│       │       │
+│       │       ├── Tạo Mess mới (new cMessage hoặc new Mess)
+│       │       │   name = "dataTest"
+│       │       │   payload[0-3] = destination Router ID (4 byte, network byte order)
+│       │       │   payload[4-7] = source Router ID (4 byte, chính là routerId của mình)
+│       │       │           ⚠ Source Router ID là BẮT BUỘC — destination cần nó để
+│       │       │             lookup routing table verify cost (Verify B).
+│       │       │             Nếu thiếu source, destination không biết ai gửi → không verify được.
+│       │       │
+│       │       ├── [Action] Gọi forwardData() — lookup + send
+│       │       │
+│       │       └── [Action] Ghi log
+│       │           └── "2b: SendTest routerId→destId"
+│       │
+│       └── [Ghi chú] 10 router × 9 đích = 90 Mess được sinh ra
+│           Các packet được gửi tuần tự hoặc theo batch nhỏ
+│
+├── [Flow] VERIFY TẠI ĐÍCH — mỗi router nhận data packet cho mình
+│   │
+│   ├── Khi destination == routerId (B1 YES)
+│   │   │
+│   │   ├── [Action] Ghi log nhận được
+│   │   │   └── "2b: Received srcId→self, cost=X"
+│   │   │       X = cost từ RoutingTable entry của srcId
+│   │   │
+│   │   ├── [Verify 1] Cost khớp?
+│   │   │   └── cost = entry của src trong routing table
+│   │   │       Nếu cost tính được từ SPF == cost từ routing table lookup
+│   │   │       → PASS
+│   │   │
+│   │   ├── [Verify 2] Đường đi đúng?
+│   │   │   └── Trace: mỗi chặng ghi log → verify packet đi qua đúng
+│   │   │       các router trung gian theo shortest-path tree
+│   │   │
+│   │   └── [Action] delete msg
+│   │
+│   └── Sau khi nhận đủ 9 data packet (từ 9 nguồn)
+│       └── Kết thúc test cho router này
+│
+├── [Parallel] 10 TIẾN TRÌNH SONG SONG — mỗi router chạy độc lập
+│   │
+│   ├── Mỗi router tự sinh 9 test packet đến 9 router khác
+│   ├── Các packet đi qua mạng song song, không phụ thuộc lẫn nhau
+│   └── Mỗi router vừa là nguồn, vừa là đích, vừa là forwarder trung gian
+│
+└── ── (Tương tác giữa các tiến trình) ──
+    │
+    ├── Packet từ router A đến router B có thể đi qua
+    │   router C (trung gian) — C forward gói tin mà không biết
+    │   đó là test packet
+    │
+    └── Kết quả test tổng hợp: 90 packet được sinh → 90 packet đến đích
+        (trừ trường hợp topology bị lỗi → packet bị drop)
+
+
+================================================================================
+CHI TIẾT: FORWARD DATA — routing table lookup (Section 11.1, P2P đơn giản hóa)
+================================================================================
+
+[Flow] forwardData(msg, ifIndex)
+  Input: Mess* msg (payload[0-3] = dest Router ID, payload[4-7] = src Router ID),
+         ifIndex (gate nhận, -1 nếu từ local)
+  Output: void (gửi tiếp hoặc delete)
+│
+├── 1. Parse destination + source
+│   ├── dest   = (payload[0] << 24) | (payload[1] << 16) |
+│   │           (payload[2] << 8) | payload[3]
+│   ├── srcId  = (payload[4] << 24) | (payload[5] << 16) |
+│   │           (payload[6] << 8) | payload[7]
+│   │
+│   └── [Tree] dest == routerId ?
+│       ├── YES → packet đến đích
+│       │   ├── [Verify B] expectedCost = tìm routing table entry cho srcId
+│       │   │   → ghi log cost + PASS/FAIL
+│       │   ├── Ghi log: "2b: Received srcId→self cost=X"
+│       │   └── delete msg; return
+│       │
+│       └── NO → cần forward tiếp
+│
+├── 2. [Loop] Routing table lookup (Section 11.1)
+│   │
+│   └── Duyệt RoutingTable[]:
+│       │
+│       ├── [Tree] Tìm entry có destinationType == 'R' (router)
+│       │   và destinationId == dest?
+│       │   │
+│       │   ├── CÓ:
+│       │   │   ├── nextHopId = entry.nextHop
+│       │   │   ├── cost = entry.cost
+│       │   │   └── [ECMP] Nếu có nhiều entry cùng dest (ECMP)?
+│       │   │       └── Chọn nextHop đầu tiên (hoặc round-robin — tùy thiết kế)
+│       │   │
+│       │   └── KHÔNG → unreachable
+│       │       ├── Ghi log: "2b: No route to dest, drop"
+│       │       └── delete msg; return
+│       │
+│       └── (Luôn tìm thấy trên P2P single-area topology 10 router — SPF đảm bảo)
+│
+├── 3. [Loop] Tìm output gate từ nextHop Router ID
+│   │
+│   └── Duyệt interfaces[]:
+│       │
+│       └── [Tree] interfaces[i].neighbor.IDNeighbor == nextHopId?
+│           │
+│           ├── CÓ → gateIndex = i
+│           └── KHÔNG → tiếp tục
+│               │
+│               └── Hết interfaces không tìm thấy → lỗi
+│                   ├── Ghi log: "2b: NextHop not directly connected"
+│                   └── delete msg; return
+│
+├── 4. Forward
+│   ├── send(msg, "gate$o", gateIndex)
+│   └── Ghi log: "2b: Forward srcId→dest via gate[gateIndex]→nextHopId"
+│       └── (msg đã được send, không delete — OMNeT++ quản lý)
+│
+└── [Done] Kết thúc forwardData
+
+
+================================================================================
+CHI TIẾT: INIT FORWARDING TEST — sinh test packets
+================================================================================
+
+[Flow] initForwardingTest()
+  Input: state (OspfRouterState)
+  Output: gửi 9 Mess ra mạng
+│
+├── [Kiểm tra] RoutingTable có đủ entry?
+│   ├── Nếu routing table rỗng → không thể test (SPF chưa chạy)
+│   │   └── defer: scheduleAt(simTime() + 0.5, testTimer)
+│   └── Nếu có entry → bắt đầu test
+│
+├── Xây danh sách destination:
+│   └── [Loop] Với mỗi destId từ 1..10:
+│       └── Nếu destId != routerId → thêm vào list
+│           (đảm bảo không gửi cho chính mình)
+│
+├── [Loop] VỚI MỖI destination TRONG LIST (9 destinations)
+│   │
+│   └── Điều kiện lặp: còn dest trong list
+│       Điều kiện kết thúc: hết list
+│       │
+│       ├── Tạo Mess mới
+│       │   ├── name = "dataTest"
+│       │   └── payload = [4 byte destId] + [4 byte routerId]
+│       │       ⚠ payload[0-3] = destId (destination Router ID, network byte order)
+│       │         payload[4-7] = routerId (source Router ID của router gửi)
+│       │         Cả 2 đều BẮT BUỘC — destination cần source để verify cost
+│       │
+│       ├── [Action] Gọi forwardData(msg, -1)
+│       │   └── ifIndex = -1 (từ local, không từ gate nào)
+│       │       → lookup routing table → gửi ra gate thích hợp
+│       │
+│       └── Ghi log:
+│           └── "2b: Test: self→destId"
+│
+└── [Done] 9 test packet đã được gửi
+
+
+================================================================================
+CHI TIẾT: VERIFY TẠI ĐÍCH — kiểm tra kết quả
+================================================================================
+
+Mỗi router khi nhận được data packet cho chính mình (dest == routerId):
+
+[Flow] verifyPacket(srcId, pathLog[])
+  Input: srcId — Router ID nguồn (lấy từ payload[4-7])
+         pathLog[] — các chặng đã đi qua (từ log)
+│
+├── [Verify A] Packet đến đúng đích
+│   ├── Kiểm tra: srcId đã ghi trong log gửi?
+│   ├── [Tree] Có log gửi tương ứng từ router nguồn?
+│   │   ├── CÓ → PASS: packet đã đến đúng router
+│   │   └── KHÔNG → FAIL: packet lạ (lỗi)
+│
+├── [Verify B] Cost khớp routing table
+│   ├── expectedCost = tìm routing table entry cho srcId
+│   ├── [Tree] expectedCost == cost thực tế?
+│   │   ├── CÓ → PASS
+│   │   └── KHÔNG → FAIL (ghi log mismatch)
+│
+├── [Verify C] Đường đi đúng (Section 16.1)
+│   ├── Tính expectedPath[] từ SPF tree của self
+│   │   (các router trên đường từ src đến self)
+│   ├── [Tree] pathLog[] khớp với expectedPath[]?
+│   │   ├── CÓ → PASS
+│   │   └── KHÔNG → FAIL (ghi log wrong path)
+│
+└── Tổng hợp kết quả cho srcId
+    └── "PASS" nếu cả A, B, C đều PASS; "FAIL" nếu bất kỳ không PASS
+
+
+================================================================================
+TOÀN BỘ 90 TEST CASES
+================================================================================
+
+Ma trận 10×9:
+
+        Đích (destination)
+Nguồn │ R1  R2  R3  R4  R5  R6  R7  R8  R9  R10
+──────┼──────────────────────────────────────────
+R1    │  -  T1  T2  T3  T4  T5  T6  T7  T8  T9
+R2    │ T10  -  T11 T12 T13 T14 T15 T16 T17 T18
+R3    │ T19 T20  -  T21 T22 T23 T24 T25 T26 T27
+R4    │ T28 T29 T30  -  T31 T32 T33 T34 T35 T36
+R5    │ T37 T38 T39 T40  -  T41 T42 T43 T44 T45
+R6    │ T46 T47 T48 T49 T50  -  T51 T52 T53 T54
+R7    │ T55 T56 T57 T58 T59 T60  -  T61 T62 T63
+R8    │ T64 T65 T66 T67 T68 T69 T70  -  T71 T72
+R9    │ T73 T74 T75 T76 T77 T78 T79 T80  -  T81
+R10   │ T82 T83 T84 T85 T86 T87 T88 T89 T90  -
+
+Mỗi test case Tn gồm:
+  ├── Nguồn: router A
+  ├── Đích: router B (B ≠ A)
+  ├── Hành vi: A tạo Mess(dest=B) → forwardData → ... → forwardData → B nhận
+  ├── Expected: packet đến B, cost = routingTable[B] tại A
+  └── Verify: A, B, và mọi router trung gian ghi log → tổng hợp PASS/FAIL
+
+
+================================================================================
+CẤU TRÚC XỬ LÝ TRONG handleMessage (cho Phase 2b)
+================================================================================
+
+handleMessage(msg) — PHASE 2B ADDITIONS
+│
+│   ⚠⚠⚠ QUAN TRỌNG: Code ospf.cc HIỆN TẠI có dòng:
+│     if (pktType == 0) { delete msg; return; }
+│     (ngay sau OspfMess::parse, trước switch type 1-5)
+│     Dòng này sẽ DELETE mọi data packet trước khi kịp xử lý!
+│     → PHẢI SỬA: thay bằng else-if chain hoặc bỏ dòng delete đó
+│       để data packet rơi xuống nhánh xử lý bên dưới.
+│
+├── (Trong nhánh self-message hiện tại)
+│   │
+│   └── [Tree] msg == testTimer (self-message kích hoạt test)?
+│       │
+│       ├── YES → [Flow] KHỞI TẠO TEST
+│       │   │
+│       │   ├── 1. Kiểm tra routing table không rỗng
+│       │   │   ├── Có entry → tiếp tục
+│       │   │   └── Rỗng → schedule lại testTimer sau 0.5s
+│       │   │
+│       │   ├── 2. [Loop] Gửi 9 test packet đến các router khác
+│       │   │   └── forwardData(createDataMsg(destId), -1)
+│       │   │
+│       │   └── 3. Dọn dẹp
+│       │       └── delete msg; testTimer = nullptr
+│       │
+│       └── NO → (tiếp tục xử lý timer khác)
+│
+└── (Trong nhánh gói tin đến, sau khi đã xử lý OSPF type 1-5 và
+     pktType == 0 — gói tin không phải OSPF protocol)
+    │
+    ├── [Tree] pktType == 0 ?
+    │   │
+    │   ├── YES → [Flow] XỬ LÝ DATA PACKET
+    │   │   │
+    │   │   ├── 1. Kiểm tra msg là Mess
+    │   │   │   └── if (dynamic_cast<Mess*>(msg) != nullptr)
+    │   │   │
+    │   │   ├── 2. [Action] forwardData(msg, ifIndex)
+    │   │   │   └── parse dest → lookup → forward hoặc nhận
+    │   │   │       (forwardData tự quản lý delete/send)
+    │   │   │
+    │   │   └── 3. Kết thúc (không delete msg ở đây — forwardData đã xử lý)
+    │   │
+    │   └── NO → (gói tin không xác định → delete như hiện tại)
+    │
+    └── [Ghi chú] Thứ tự ưu tiên trong handleMessage:
+        1. Timer messages (self-message)
+        2. OSPF protocol packets (type 1-5)
+        3. Data packets (type 0 / không phải OSPF)
+
+
+================================================================================
+LƯU Ý TRIỂN KHAI
+================================================================================
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         LƯU Ý KHI CODE                                   │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ 1. forwardData() là method mới của routerOspf:                           │
+│    void forwardData(Mess* msg, int ifIndex);                             │
+│    - ifIndex = -1 nếu packet từ local (self-message)                     │
+│    - ifIndex ≥ 0 nếu packet từ gate (forward trung gian)                │
+│    - Parse destination từ payload                                       │
+│    - Lookup routing table                                               │
+│    - Forward ra gate hoặc nhận tại đích                                  │
+│                                                                          │
+│ 2. Cấu trúc dữ liệu data packet (tái sử dụng Mess):                     │
+│    Mess.payload: (8 byte)                                                  │
+│      [0-3] destination Router ID (4 byte, network byte order)               │
+│      [4-7] source Router ID (4 byte, network byte order)                   │
+│    ⚠ Source là BẮT BUỘC — thiếu source thì destination không thể          │
+│      lookup routing table để verify cost (Verify B)                        │
+│    → Không cần tạo class message mới, dùng Mess có sẵn                    │
+│                                                                          │
+│ 3. Phân biệt data packet vs OSPF packet:                                │
+│    - OspfMess::parse() trả về type 1-5 cho OSPF packet hợp lệ           │
+│    - parse() trả về 0 → đó là data packet (trong môi trường simulation   │
+│      chỉ có code của mình chạy, không có OSPF malformed từ bên ngoài)    │
+│    - Kiểm tra dynamic_cast<Mess*> để chắc chắn đó là Mess              │
+│    ⚠ PHẢI SỬA dòng `if (pktType == 0) { delete msg; return; }` hiện có  │
+│      → Thay bằng else-if để data packet rơi xuống nhánh xử lý bên dưới  │
+│      Ví dụ cấu trúc mới: if(pktType==1){...} else if(pktType==2){...}   │
+│      ... else if(pktType==5){...} else { /* data packet */ }            │
+│                                                                          │
+│ 4. Test initialization:                                                  │
+│    - Thêm cMessage* testTimer trong routerOspf (private)                 │
+│    - schedule testTimer ở initialize() hoặc sau khi SPF hoàn tất        │
+│    - SPF delay (spfTimer cháy) → testTimer schedule sau 0.5s            │
+│    - testTimer cháy → initForwardingTest()                               │
+│                                                                          │
+│ 5. Giới hạn forwardData:                                                 │
+│    - Chỉ forward nếu destination != routerId                             │
+│    - Không forward nếu nextHop == 0 (unreachable). ⚠ nextHop == 0 là     │
+│      giá trị đặc biệt (Router ID không dùng 1-10), không phải INFINITY.  │
+│      calcNextHop dùng UINT_MAX cho "không tìm thấy".                     │
+│    - Tìm gate từ interfaces[i].neighbor.IDNeighbor == nextHop            │
+│                                                                          │
+│ 6. Log mỗi bước forward:                                                 │
+│    state->logTransition("2b", "Forward: R1→R5 via gate 2 to R2",        │
+│                         simTime().dbl(), ifIndex);                       │
+│    Mỗi router ghi log → ghép log toàn mạng → trace được đường đi        │
+│                                                                          │
+│ 7. Xử lý ECMP cho forwarding test (Section 16.8):                       │
+│    - ECMP là tính năng OSPF chuẩn: khi có nhiều đường cùng cost đến     │
+│      cùng đích, RFC 2328 cho phép chọn bất kỳ đường nào trong ECMP set  │
+│    - Dự án: routing table chỉ lưu 1 nextHop (RoutingTableEntry.nextHop  │
+│      là uint32_t, không phải vector). Khi ECMP xảy ra, nextHop là       │
+│      predecessor đầu tiên trong SPF — đây là simplification cho test.   │
+│    - Khi verify, CHỈ kiểm tra packet đến đúng đích. KHÔNG kiểm tra       │
+│      packet đi qua đường cụ thể nào — mọi đường ECMP đều hợp lệ.         │
+│      Verify C (đường đi đúng) là tùy chọn, chỉ để debug.                │
+│                                                                          │
+│ 8. Timer testTimer khai báo trong ospf.h:                                │
+│    cMessage* testTimer;     // Timer kích hoạt forwarding test          │
+│    void forwardData(Mess* msg, int ifIndex);  // Forward data packet     │
+│    void initForwardingTest();                   // Khởi tạo 9 test packet│
+│                                                                          │
+│ 9. finish() cần cancelAndDelete testTimer nếu chưa cháy                 │
+│                                                                          │
+│ 10. Thời điểm kích hoạt test:                                            │
+│     - initialize: testTimer = nullptr                                    │
+│     - Khi spfTimer cháy lần cuối (Phase 2a kết thúc):                   │
+│       if (!testTimer) {                                                  │
+│           testTimer = new cMessage("testTimer");                         │
+│           scheduleAt(simTime() + 0.1, testTimer);  // 0.1s sau SPF     │
+│       }                                                                  │
+│     - testTimer cháy → initForwardingTest()                             │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+KẾT QUẢ DỰ KIẾN SAU KHI 2b HOÀN TẤT
+================================================================================
+
+Trạng thái mong đợi sau khi 90 test cases chạy xong:
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    KẾT QUẢ 2b — TEST FORWARDING                          │
+├──────────────────────────────────────┬───────────────────────────────────┤
+│ Thành phần                           │ Giá trị mong đợi                 │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ Tổng test packet gửi                 │ 90 (10 router × 9 đích)          │
+│ Tổng packet đến đích                 │ 90                               │
+│ Tổng packet bị drop                  │ 0 (trừ khi topology bị broken)   │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ Mỗi router gửi                       │ 9 packets                         │
+│ Mỗi router nhận                      │ 9 packets                         │
+│ Mỗi router forward (trung gian)      │ Khoảng 180-270 lần (tùy topology) │
+│                                       │ (Σ(path_length-1) cho 90 packets) │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ Kết quả verify từng test case:       │                                   │
+│  ├── Packet đến đúng đích            │ PASS / FAIL                      │
+│  ├── Cost khớp routing table         │ PASS / FAIL (ghi cost thực tế)   │
+│  ├── Đường đi đúng (tùy chọn)        │ PASS / FAIL (trace path)         │
+│  └── PASS rate (mục tiêu)               │ 90/90 = 100%                     │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ RoutingTable                         │ Giữ nguyên (không thay đổi)      │
+│ LSDB (routerLSAs[])                  │ Giữ nguyên                       │
+│ Neighbor states                      │ Full (giữ nguyên)               │
+│ Interface states                     │ PointToPoint (giữ nguyên)        │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ Log output:                          │                                   │
+│  state_dump/2b/                      │ ─ Mỗi router 1 file dump cuối   │
+│  Trong log mỗi router:               │                                   │
+│   "2b: Test: R1→R5 (src=1, dst=5)"   │ Gửi test packet                  │
+│   "2b: Forward: 1→5 via gate[2]→R2" │ Forward trung gian (gate index,   │
+│                                       │  nextHop Router ID)               │
+│   "2b: Received: 1→self cost=3"      │ Nhận tại đích + verify cost      │
+└──────────────────────────────────────┴───────────────────────────────────┘
+
+Ví dụ với mạng 10 router mesh (cost=1 mỗi link):
+
+  R1 gửi đến R10:
+    ┌─ R1 → R2 → R3 → R8 → R10  (cost 4)
+    │   ^     ^     ^     ^
+    │   |     |     |     |
+    │  Test  Fwd   Fwd   Fwd
+    │  send  gate  gate  gate
+    │        0     1     1
+    │
+    └─ Mỗi chặng ghi log → verify đúng path, đúng cost
+
+  Điều kiện để Phase 2b PASS:
+    - 90/90 packets đến đúng đích
+    - Tất cả cost khớp routing table tại thời điểm test
+    - Không có packet lạ / packet bị lạc đường
+
+  ┌────────────────────────────────────────────────────────────────────────────┐
+  │ CHUYỂN TIẾP SANG PHASE 3 (SCENARIOS)                                     │
+  │                                                                           │
+  │ Sau Phase 2b, hệ thống sẵn sàng cho các kịch bản mô phỏng:               │
+  │ → S1: Steady-state — baseline, forwarding đã hoạt động                   │
+  │ → S2: Link failure leaf (R6-R4) — OSPF hội tụ lại                       │
+  │ → S3: Link failure backbone (R2-R5) — SPF tính lại                      │
+  │ → S4: Link recovery (phục hồi R2-R5) — topology thay đổi                │
+  │ → S5: Multiple failures (R1-R2 + R4-R5) — multi-link fail               │
+  │                                                                           │
+  │ Điều kiện chuyển tiếp:                                                    │
+  │   - 90/90 test packets đã forward thành công                             │
+  │   - Routing table đã được verify: mọi destination đều reachable          │
+  │   - forwardData() đã được tích hợp vào handleMessage                    │
+  │   - Log cơ bản đã hoạt động (ghi lại mỗi bước forward)                  │
+  └────────────────────────────────────────────────────────────────────────────┘

@@ -1,0 +1,614 @@
+================================================================================
+2a — SPF CALCULATION + ROUTING TABLE (Tính đường đi ngắn nhất)
+  Section 16 (Calculation of the routing table)
+  16.1 (Calculating the shortest-path tree for an area)
+  16.1.1 (The next hop calculation)
+  16.2–16.4 (Bỏ qua: inter-area, transit, AS-external — single-area)
+  16.8 (Equal-cost multipath)
+  A.4.2 (Router-LSA format)
+================================================================================
+
+Mục tiêu: Từ LSDB đã đồng bộ (sau Phase 1), xây dựng shortest-path tree
+  với root = self, sau đó sinh routing table cho forwarding.
+  Chỉ intra-area routes (pathType = PATH_INTRA_AREA).
+  Hỗ trợ ECMP (nhiều next-hop cho cùng đích).
+  SPF schedule khi có LSA mới cài vào LSDB.
+
+Lưu ý scope dự án (xem docs/plan thinking/):
+  - P2P only → transit vertex chỉ có router vertices (không network vertices)
+  - Single-area → bỏ qua inter-area, AS-external routes
+  - Router-LSA only → không có Network/Summary/AS-external-LSA
+  - Mỗi interface có đúng 1 neighbor (cấp phát tĩnh)
+  - nextHop là gate index (int), không có IP address — P2P không cần next-hop IP
+  - Khi parent là root → nextHop = gate index kết nối tới đích
+  - Khi parent không là root → nextHop = nextHop của parent (inheritance)
+
+===============================================================================
+CẤU TRÚC TỔNG QUAN (dạng tree)
+===============================================================================
+
+2a: SPF CALCULATION + ROUTING TABLE
+│
+├── [Flow] SCHEDULE SPF DELAY (Section 13.2)
+│   └── Điều kiện kích hoạt: khi có LSA mới cài vào LSDB
+│       (spfTimer == nullptr trong 1c.F: LSA installed)
+│       │
+│       ├── [Kiểm tra] spfTimer đang chạy?
+│       │   ├── YES → không làm gì (Section 13.2: SPF delay đã schedule)
+│       │   └── NO → scheduleAt(now + SPFDelay, spfTimer)
+│       │       └── [Ghi chú] SPF delay tránh tính toán lại quá thường xuyên
+│       │           khi nhiều LSA đến cùng lúc
+│       │
+│       └── KẾT THÚC — chỉ schedule, chưa tính SPF
+│
+├── [Flow] SPF TIMER CHÁY — bắt đầu tính toán
+│   └── Điều kiện: spfTimer cháy (timer đến hạn)
+│       │
+│       ├── 0. Backup routing table cũ (phát hiện thay đổi, Section 16 step 1)
+│       │   └── [Action] Lưu routing table hiện tại sang oldRoutingTable
+│       │
+│       ├── 1. Clear routing table cũ (Section 16 step 1)
+│       │   └── routingTable.clear()
+│       │
+│       ├── 2. [Flow] BUILT SHORTEST-PATH TREE (Section 16.1)
+│       │   └── Gọi spf.calculate(selfRouterId, LSDB)
+│       │       │
+│       │       ├── [Flow] Stage 1: Dijkstra trên transit vertices
+│       │       │   └── Z chi tiết ở dưới
+│       │       │
+│       │       ├── [Flow] Stage 2: Thêm stub networks (P2P link stubs)
+│       │       │   └── Z chi tiết ở dưới
+│       │       │
+│       │       └── Trả về: spfVertices[] (cây SPF với nextHop, distance)
+│       │
+│       ├── 3. [Flow] BUILD ROUTING TABLE từ SPF tree
+│       │   └── Z chi tiết ở dưới
+│       │
+│       ├── 4. [Flow] PHÁT HIỆN THAY ĐỔI (Section 12.4 Event 4)
+│       │   └── So sánh routing table mới vs backup
+│       │       │
+│       │       ├── [Tree] Có thay đổi?
+│       │       │   ├── CÓ → originate lại Router-LSA
+│       │       │   │   └── [Action] state->originateRouterLSA()
+│       │       │   │       └── Flood LSA mới (Section 12.4 Event 4)
+│       │       │   └── KHÔNG → không làm gì
+│       │
+│       └── 5. Dọn dẹp: spfTimer = nullptr; delete msg cũ
+│
+└── [Flow] SPF RESULT → TRẠNG THÁI MONG ĐỢI
+    └── Mỗi router có:
+        ├── spfVertices[]: shortest-path tree (parent/child)
+        ├── RoutingTable[]: {dest, cost, nextHop}
+        └── Sẵn sàng cho Phase 2b (Data Forwarding)
+
+
+===============================================================================
+CHI TIẾT: STAGE 1 — DIJKSTRA TRÊN TRANSIT VERTICES (Section 16.1)
+===============================================================================
+
+[Flow] spfCalculate(selfRouterId, LSDB) — Stage 1: Dijkstra
+│
+├── [Kiểm tra đầu vào]
+│   ├── LSDB có routerLSAs[] cần không empty? Nếu empty → trả về rỗng, kết thúc
+│   └── self có Router-LSA trong LSDB? Nếu không → không thể tính, kết thúc
+│
+├── 1. Khởi tạo (Section 16.1 step 1)
+│   ├── Tạo dist[]: map<routerID → uint32_t>, khởi tạo tất cả = INFINITY
+│   ├── dist[self] = 0
+│   ├── prev[]: map<routerID → vector<routerID>> (danh sách predecessor cho ECMP)
+│   ├── nextHop[]: map<routerID → int> (next-hop gate index)
+│   ├── Tập vertices: v = {advertisingRouter của mọi Router-LSA trong LSDB}
+│   ├── Tập tree: rỗng (các vertex đã được chọn vào SPF tree)
+│   └── Tập candidate: rỗng (các vertex đang xem xét)
+│
+├── 2. [Loop] DIJKSTRA LOOP CHÍNH (Section 16.1 steps 2-5)
+│   │
+│   └── Điều kiện lặp: candidate list không empty HOẶC đây là lần đầu
+│       (phải xét root trước)
+│       Điều kiện kết thúc: candidate list empty
+│       │
+│       ├── [Kiểm tra] Lần đầu tiên?
+│       │   ├── YES → V = self (root), thêm self vào tree ngay
+│       │   └── NO → (Section 16.1 step 3)
+│       │       │   Chọn vertex U có dist[] nhỏ nhất trong candidate
+│       │       │   Loại U khỏi candidate, thêm U vào tree
+│       │       │   └── V = U (vertex vừa thêm)
+│       │       │
+│       │       └── [Ghi chú] Khi có nhiều vertex cùng dist, network vertex
+│       │           được chọn trước router vertex (Section 16.1 step 3).
+│       │           P2P không có network vertex → không cần tie-break đặc biệt
+│       │
+│       ├── 2a. Tìm LSA của V trong LSDB (Section 16.1 step 2)
+│       │   ├── Nếu không tìm thấy hoặc LS age == MaxAge
+│       │   │   └── Skip V — không có LSA hợp lệ
+│       │   └── Tìm được Router-LSA của V
+│       │       └── Duyệt từng link trong V's Router-LSA
+│       │
+│       ├── 2b. [Loop] DUYỆT TỪNG LINK CỦA V (Section 16.1 step 2b)
+│       │   │
+│       │   └── Điều kiện lặp: còn link trong V's Router-LSA.links[]
+│       │       Điều kiện kết thúc: hết links
+│       │       │
+│       │       ├── Lấy link: linkID, linkData, type, metric
+│       │       │
+│       │       ├── [Tree] Phân loại link (Section 16.1 step 2a-2b)
+│       │       │   │
+│       │       │   ├── Type == LINK_STUB (3):
+│       │       │   │   └── [Bỏ qua] stub links chỉ xử lý ở Stage 2
+│       │       │   │       (Section 16.1 step 2a)
+│       │       │   │
+│       │       │   ├── Type == LINK_P2P (1):
+│       │       │   │   ├── W = linkID (Router ID của neighbor ở đầu kia)
+│       │       │       ├── [Kiểm tra] LSA của W có hợp lệ? (Section 16.1 step 2b)
+│       │       │       │   ├── Có tồn tại LSA của W trong LSDB?
+│       │       │       │   ├── LS age == MaxAge? → skip (LSA hết hạn)
+│       │       │       │   └── Có link ngược lại tới V? (bidirectional check)
+│       │       │       │       → Nếu bất kỳ FAIL → skip link này
+│       │       │   │   └── W là transit vertex (router)
+│       │       │   │       → đến 2b.ii xử lý
+│       │       │   │
+│       │       │   └── Type == LINK_TRANSIT (2):
+│       │       │       └── [Bỏ qua] transit link dùng cho broadcast/NBMA
+│       │       │           Dự án P2P không dùng
+│       │       │
+│       │       ├── [Tree] W đã trong tree? (Section 16.1 step 2c)
+│       │       │   ├── YES → skip (đã có đường đi ngắn nhất đến W)
+│       │       │   └── NO → tiếp tục
+│       │       │
+│       │       └── [Tree] Tính D = dist[V] + metric (Section 16.1 step 2d)
+│       │           │
+│       │           ├── D > dist[W] hiện tại?
+│       │           │   └── YES → skip (đường này dài hơn đường đã biết)
+│       │           │
+│       │           ├── D == dist[W] hiện tại? (ECMP)
+│       │           │   ├── YES → (Section 16.1 step 2d, case equal)
+│       │           │   │   │   Tính next-hop từ (W, V)
+│       │           │   │   │   Thêm V vào prev[W]
+│       │           │   │   │   Thêm next-hop vào nextHop[W]
+│       │           │   │   │   └── [Ghi chú] ECMP: W có ≥ 2 next-hop khác nhau
+│       │           │   │   │       qua các predecessor khác nhau
+│       │           │   │   └── Không thay đổi dist[W]
+│       │           │   │
+│       │           │   └── D < dist[W] (hoặc W chưa trong candidate)
+│       │           │       ├── (Section 16.1 step 2d, case less)
+│       │           │       ├── dist[W] = D
+│       │           │       ├── prev[W] = {V}
+│       │           │       ├── nextHop[W] = tính next-hop từ (W, V)
+│       │           │       └── Thêm W vào candidate (hoặc update dist trong candidate)
+│       │           │
+│       │           └── [Done] Xong link này → link tiếp theo
+│       │
+│       └── LẶP LẠI từ bước 2 (chọn vertex mới từ candidate)
+│
+├── 3. Kết thúc Stage 1
+│   └── Đã có dist[], prev[], nextHop[] cho mọi router reachable
+│
+└── [Ghi chú] TransitCapability (Section 16.1 step 2)
+    └── Trong quá trình duyệt, nếu Router-LSA của V có bit V set
+        (virtual link endpoint) → Area.transitCapability = TRUE.
+        Dự án single-area không dùng, nhưng set cho đúng RFC.
+
+
+===============================================================================
+CHI TIẾT: NEXT-HOP CALCULATION (Section 16.1.1)
+===============================================================================
+
+[Flow] calcNextHop(W, V, self)
+  Input: destination W, parent V, self router ID
+  Output: next-hop gate index (int)
+│
+├── [Tree] V == self? (Section 16.1.1, case 1)
+│   ├── YES: parent là root
+│   │   │
+│   │   ├── Tìm interface kết nối trực tiếp tới W
+│   │   │   ├── Duyệt interfaces[]
+│   │   │   │   └── Nếu interface.neighbor.IDNeighbor == W
+│   │   │   │       → return interface index (next-hop = gate đó)
+│   │   │   └── [Ghi chú] P2P: không cần IP next-hop, chỉ cần gate index
+│   │   │
+│   │   └── Nếu không tìm thấy (lỗi) → return -1
+│   │
+│   └── NO: parent không là root
+│       │
+│       └── [Đệ quy] Kế thừa next-hop từ parent (Section 16.1.1)
+│           ├── return nextHop[V] (đã tính khi V được thêm vào tree)
+│           └── [Ghi chú] Vì nextHop[V] đã được tính chính xác khi V
+│               được chọn vào tree, W chỉ việc inherit
+│
+└── [Done] Trả về next-hop gate index
+
+
+===============================================================================
+CHI TIẾT: STAGE 2 — THÊM STUB NETWORKS (Section 16.1, Stage 2)
+===============================================================================
+
+[Flow] Stage 2: Add stub networks
+│
+├── Điều kiện vào: Stage 1 đã hoàn tất (dist[], prev[], nextHop[] có data)
+│
+├── [Loop] DUYỆT TỪNG REACHABLE ROUTER VERTEX
+│   │
+│   └── Điều kiện lặp: còn router vertex V có dist[V] < INFINITY
+│       Điều kiện kết thúc: hết router vertices reachable
+│       │
+│       ├── Lấy Router-LSA của V từ LSDB
+│       ├── [Loop] Duyệt từng link trong Router-LSA
+│       │   │
+│       │   └── Điều kiện lặp: còn link
+│       │       Điều kiện kết thúc: hết links
+│       │       │
+│       │       ├── [Tree] Link type == LINK_STUB (3)?
+│       │       │   ├── YES → (Section 16.1 Stage 2 step 1-2)
+│       │       │   │   │
+│       │       │   │   ├── N = linkID (địa chỉ mạng stub)
+│       │       │   │   ├── cost = dist[V] + link.metric
+│       │       │   │   │
+│       │       │   │   ├── [So sánh] cost hiện tại của route tới N
+│       │       │   │   │   ├── Nếu cost > bestCost hiện tại → skip
+│       │       │   │   │   ├── Nếu cost == bestCost hiện tại → ECMP:
+│       │       │   │   │   │   thêm nextHop[V] vào route của N
+│       │       │   │   │   └── Nếu cost < bestCost hiện tại →
+│       │       │   │   │       ghi đè: cost = cost, nextHop = nextHop[V]
+│       │       │   │   │
+│       │       │   │   └── [Ghi chú] P2P stub: linkData = địa chỉ IP của
+│       │       │   │       interface (32-bit), dùng làm destinationId
+│       │       │   │
+│       │       │   └── NO → bỏ qua (đã xử lý ở Stage 1)
+│       │       │
+│       │       └── [Done] Xong link này → link tiếp theo
+│       │
+│       └── [Done] Xong vertex V → vertex tiếp theo
+│
+└── Kết thúc Stage 2
+    └── Đã có đầy đủ intra-area routes cho mọi destination
+
+
+===============================================================================
+CHI TIẾT: BUILD ROUTING TABLE (Section 16 step 4)
+===============================================================================
+
+[Flow] buildRoutingTable(dist[], prev[], nextHop[], LSDB)
+│
+├── 1. [Loop] DUYỆT TỪNG REACHABLE ROUTER
+│   │
+│   └── Với mỗi router W có dist[W] < INFINITY và W != self
+│       │
+│       ├── [Action] Thêm RoutingTableEntry cho W
+│       │   ├── destinationType = destinationType_Router
+│       │   ├── destinationId = W (Router ID)
+│       │   ├── cost = dist[W]
+│       │   ├── pathType = PATH_INTRA_AREA (1)
+│       │   ├── nextHop = interfaces[nextHop[W]].neighbor.IDNeighbor
+│       │   │   (chuyển gate index → Router ID của neighbor)
+│       │   │   └── [ECMP] Nếu W có nhiều next-hop → thêm tất cả
+│       │   └── area = areaID (backbone)
+│       │
+│       └── [Done] Router tiếp theo
+│
+├── 2. [Loop] DUYỆT TỪNG STUB NETWORK
+│   │
+│   └── Với mỗi stub N tìm được ở Stage 2
+│       │
+│       ├── [Action] Thêm RoutingTableEntry cho N
+│       │   ├── destinationType = destinationType_Network
+│       │   ├── destinationId = N (IP address của stub)
+│       │   ├── addressMask = 0xFFFFFFFF (host route, P2P)
+│       │   ├── cost = bestCost[N]
+│       │   ├── pathType = PATH_INTRA_AREA (1)
+│       │   ├── nextHop = nextHop của stub N
+│       │   └── area = areaID (backbone)
+│       │
+│       └── [Done] Stub tiếp theo
+│
+├── 3. Sort routing table (theo destinationId)
+│   └── [Action] std::sort(routingTable.begin(), routingTable.end())
+│
+└── KẾT THÚC
+    └── Routing table đã sẵn sàng cho forwarding
+
+
+===============================================================================
+CẤU TRÚC XỬ LÝ TRONG handleMessage (cho Phase 2a)
+===============================================================================
+
+handleMessage(msg) — PHASE 2A ADDITIONS
+│
+└── (Trong nhánh self-message hiện tại)
+    │
+    └── [Tree] msg == spfTimer?
+        │
+        ├── YES → [Flow] SPF TIMER CHÁY
+        │   │
+        │   ├── 1. Backup routing table cũ
+        │   │
+        │   ├── 2. Clear routing table
+        │   │   └── state->RoutingTable.clear()
+        │   │
+        │   ├── 3. [Flow] TÍNH SPF
+        │   │   └── Gọi spfCalculate(routerId, state->area.routerLSAs):
+        │   │       │
+        │   │       ├── Stage 1: Dijkstra
+        │   │       │   └── dist[], prev[], nextHop[]
+        │   │       │
+        │   │       ├── Stage 2: Add stub networks
+        │   │       │   └── Thêm routes stub vào routing table tạm
+        │   │       │
+        │   │       └── Trả về: spfVertices[], nextHop[]
+        │   │
+        │   ├── 4. [Flow] BUILD ROUTING TABLE
+        │   │   └── Duyệt spfVertices[] → sinh state->RoutingTable[]
+        │   │       ├── Mỗi reachable router ≠ self → RouterEntry
+        │   │       └── Mỗi reachable stub → NetworkEntry
+        │   │
+        │   ├── 5. [Flow] PHÁT HIỆN THAY ĐỔI (Section 12.4 Event 4)
+        │   │   └── So sánh routing table mới vs backup
+        │   │       ├── Có thay đổi → originateRouterLSA() + flood
+        │   │       └── Không thay đổi → skip
+        │   │
+        │   ├── 6. [Action] Ghi log
+        │   │   └── state->logTransition("2a", "SPF completed",
+        │   │       simTime().dbl(), -1)
+        │   │
+        │   └── 7. Dọn dẹp: spfTimer = nullptr; delete msg
+        │
+        └── NO → (tiếp tục xử lý timer khác như hiện tại)
+
+
+===============================================================================
+CHI TIẾT: HÀM SPF CALCULATE (mã giả tự nhiên)
+===============================================================================
+
+[Flow] spfCalculate(selfId, routerLSAs[])
+  Input: Router ID của self, LSDB (vector<LSA>)
+  Output: spfVertices[] (cây SPF), routing table entries
+
+──────────────────────────────────────────────────────────────────────────────
+
+I — KHỞI TẠO
+│
+├── dist = {map<routerId, uint32>}    // uint32_t để tránh overflow
+├── prev = {map<routerId, vector<routerId>>}
+├── nextHop = {map<routerId, unsigned int>}  // gate index
+├── candidate = priority_queue<pair<uint32, routerId>, greater>
+├── inTree = {set<routerId>}
+├── Tập allRouters = tất cả advertisingRouter từ routerLSAs[]
+├── Area.transitCapability = FALSE (Section 16.1 step 1)
+│
+└── dist[self] = 0
+    push (0, self) vào candidate
+
+──────────────────────────────────────────────────────────────────────────────
+
+II — DIJKSTRA LOOP
+
+while candidate không empty:
+│
+│   pop (d, V) từ candidate  // V là vertex có dist nhỏ nhất
+│   if V đã trong tree: continue
+│   Thêm V vào tree
+│
+│   // Tìm Router-LSA của V
+│   lsa = tìm routerLSA có advertisingRouter == V
+│   if lsa không tồn tại hoặc lsa.header.age == MaxAge: continue
+│
+│   // Duyệt từng link trong Router-LSA của V
+│   for each link in lsa.links:
+│   │
+│   │   if link.type == LINK_STUB:
+│   │       continue (xử lý ở Stage 2)
+│   │
+│   │   if link.type == LINK_P2P:
+│   │       W = link.linkID (Router ID của neighbor)
+│   │
+│   │       // Bidirectional check + MaxAge check (Section 16.1 step 2b)
+│   │       lsaW = tìm routerLSA có advertisingRouter == W
+│   │       if lsaW == null: continue (không tồn tại)
+│   │       if lsaW.header.age == MaxAge: continue (LSA hết hạn)
+│   │       if lsaW không có link nào linkID == V: continue (không bidirectional)
+│   │
+│   │       if W đã trong tree: continue
+│   │
+│   │       newDist = d + link.metric
+│   │
+│   │       if newDist > dist[W] (trong candidate): continue
+│   │
+│   │       if newDist == dist[W]:
+│   │           ├── Thêm V vào prev[W]
+│   │           └── Thêm nextHop[V] vào nextHop list của W
+│   │
+│   │       if newDist < dist[W] hoặc W chưa trong candidate:
+│   │           ├── dist[W] = newDist
+│   │           ├── prev[W] = {V}
+│   │           ├── nextHop[W] = calcNextHop(W, V, self)
+│   │           └── push (newDist, W) vào candidate
+│   │
+│   └── [Done link]
+│
+└── [Done] Kết thúc candidate loop
+
+──────────────────────────────────────────────────────────────────────────────
+
+III — STAGE 2: STUB NETWORKS
+
+for each reachable router V (dist[V] < INFINITY):
+│   lsa = tìm routerLSA có advertisingRouter == V
+│   if lsa == null: continue
+│
+│   for each link in lsa.links:
+│   │
+│   │   if link.type == LINK_STUB:
+│   │       stubId = link.linkID (địa chỉ IP của interface)
+│   │       stubCost = dist[V] + link.metric
+│   │       if V == self:
+│   │           stubNextHop = -1 (directly connected, no next-hop needed)
+│   │           [Ghi chú] V == self: stub link của chính mình → không cần
+│   │           forwarding, nhưng RFC yêu cầu thêm vào routing table
+│   │       else:
+│   │           stubNextHop = nextHop[V] (kế thừa từ router V)
+│   │
+│   │       Thêm stub route vào routing table:
+│   │       { dest = stubId, type = network, cost = stubCost,
+│   │         nextHop = stubNextHop, pathType = intra-area }
+│   │
+│   └── [Done stub link]
+│
+└── [Done reachable router]
+
+──────────────────────────────────────────────────────────────────────────────
+
+IV — KẾT THÚC
+│
+└── Trả về spfVertices[] (dist, prev, nextHop)
+    và routingTable[] đã được điền
+
+
+===============================================================================
+LƯU Ý THÊM VỀ ECMP
+===============================================================================
+
+ECMP (Equal-Cost MultiPath — Section 16.8)
+│
+├── Khi dist[V→W] == dist[U→W] với V ≠ U và V, U đều trong tree
+│   └── Cả V và U đều là predecessor của W
+│       → W có 2 next-hop khác nhau (qua V và qua U)
+│
+├── [Loop] XỬ LÝ TRONG BUILD ROUTING TABLE
+│   └── Khi tạo route cho W:
+│       ├── Nếu prev[W] có ≥ 2 phần tử
+│       └── Và nextHop qua mỗi predecessor là khác nhau
+│           → Thêm tất cả next-hop vào RoutingTableEntry
+│
+└── [Ghi chú] Dự án P2P, ECMP khả năng thấp
+    (mesh 10 router, link cost cố định = 1 tính từ lúc khởi tạo)
+    Nhưng implement đúng RFC để hỗ trợ
+
+
+===============================================================================
+LƯU Ý: RFC 16.1 step (4) build routing table bên TRONG Dijkstra loop
+    cho ABR/ASBR và transit network entries. Single-area P2P không có
+    hai loại entry đó → defer ra ngoài loop là valid simplification.
+
+
+LƯU Ý TRIỂN KHAI TRONG OMNET++
+===============================================================================
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                         LƯU Ý KHI CODE                                   │
+├──────────────────────────────────────────────────────────────────────────┤
+│                                                                          │
+│ 1. SPF tính trong routerOspf, KHÔNG tạo class riêng                      │
+│    → Viết 2 private method trong routerOspf:                             │
+│      - void calculateSpf()    — tính SPF khi spfTimer cháy               │
+│      - int calcNextHop(uint32_t dest, uint32_t parent) — next-hop        │
+│                                                                          │
+│ 2. Sử dụng cấu trúc đã có:                                              │
+│    - state->area.routerLSAs[] — LSDB                                     │
+│    - state->area.spfVertices[] — lưu kết quả SPF tree                   │
+│    - state->RoutingTable[] — routing table                               │
+│    - state->interfaces[i].neighbor->IDNeighbor — map interface→router    │
+│                                                                          │
+│ 3. Cấu trúc dữ liệu tạm trong calculateSpf():                            │
+│    - std::map<uint32_t, uint32_t> dist     // uint32_t tránh overflow     │
+│    - std::map<uint32_t, std::vector<uint32_t>> prev                      │
+│    - std::map<uint32_t, unsigned int> nextHop  // gate index             │
+│    - std::set<uint32_t> inTree                                           │
+│    - priority_queue<pair<uint32_t,uint32_t>, ..., greater> pq            │
+│    → Tất cả là biến local, giải phóng khi hàm kết thúc                   │
+│                                                                          │
+│ 4. SpfVertex trong state->area.spfVertices:                              │
+│    - vertexId = Router ID                                                │
+│    - parent = con trỏ tới SpfVertex cha                                  │
+│    - nextHop = gate index (unsigned int) ra ngoài                        │
+│    - distance = dist từ root                                             │
+│    - neighbors[] = các SpfVertex* con                                    │
+│    → Xây dựng sau khi có dist[] và prev[] từ Dijkstra                    │
+│    → Lưu ý: SpfVertex.nextHop là gate index; RoutingTableEntry.nextHop  │
+│      là Router ID (uint32_t). Chuyển đổi: khi build routing table,       │
+│      lookup interfaces[gateIndex].neighbor.IDNeighbor để lấy Router ID   │
+│                                                                          │
+│ 5. Priority queue:                                                       │
+│    using P = std::pair<uint32_t, uint32_t>;  // (distance, vertexId)     │
+│    std::priority_queue<P, std::vector<P>, std::greater<P>> pq;          │
+│                                                                          │
+│ 6. Kiểm tra bidirectional (Section 16.1 step 2b):                       │
+│    Từ LSA của V, link.linkID = W (neighbor)                             │
+│    → Tìm LSA của W, kiểm tra có link nào linkID == V không              │
+│    → Nếu không có → skip (link không bidirectional)                     │
+│                                                                          │
+│ 7. Loop tìm reachable router cho Stage 2:                               │
+│    for (const auto& [routerId, d] : dist)                                │
+│        if (d < INFINITY && routerId != self) ...                        │
+│                                                                          │
+│ 8. originateRouterLSA() đã có trong state                               │
+│    Chỉ gọi lại nếu SPF phát hiện thay đổi → flood LSA mới               │
+│                                                                          │
+│ 9. INFINITY = 0xFFFFFFFF (uint32_t) — tránh overflow khi cộng dồn       │
+│    RFC 2328 Section 12.4.1 nói metric là uint16_t, nhưng dist là tổng │
+│    nhiều metric → uint32_t để an toàn (V ≤ 10, cost 1/link → an toàn) │
+│                                                                          │
+│ 10. Test: SPF trên topology hiện tại → mỗi router có thể ping được      │
+│     đến mọi router khác, cost lũy kế theo số hop                         │
+│                                                                          │
+└──────────────────────────────────────────────────────────────────────────┘
+
+
+===============================================================================
+KẾT QUẢ DỰ KIẾN SAU KHI 2a HOÀN TẤT
+===============================================================================
+
+Trạng thái mong đợi trên MỖI ROUTER sau khi SPF + Routing Table được
+tính khi LSDB đã đồng bộ (Phase 1 hoàn tất, tất cả neighbor Full):
+
+┌──────────────────────────────────────────────────────────────────────────┐
+│                     KẾT QUẢ 2a — SPF + ROUTING TABLE                     │
+├──────────────────────────────────────┬───────────────────────────────────┤
+│ Thành phần                           │ Giá trị                          │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ spfVertices (cây, root=self)         │ Số đỉnh reachable (kể cả self)   │
+│  ├── vertexId                       │ Router ID của đỉnh               │
+│  ├── parent                         │ Con trỏ tới cha (nullptr nếu root)│
+│  ├── neighbors[]                    │ Các SpfVertex* con               │
+│  ├── nextHop                        │ Gate index ra ngoài (≥ 0)        │
+│  └── distance                       │ Tổng cost từ root                │
+│ RoutingTable.size()                  │ Số reachable router + stub nets  │
+│ ── Mỗi RoutingTableEntry:            │                                   │
+│  ├── destinationType                 │ destinationType_Router hoặc _Net │
+│  ├── destinationId                   │ Router ID hoặc IP address        │
+│  ├── addressMask                     │ 0xFFFFFFFF (host route, P2P)     │
+│  ├── cost                            │ ≤ INFINITY, tổng từ root        │
+│  ├── pathType                        │ PATH_INTRA_AREA (1)              │
+│  ├── nextHop                         │ Router ID của next-hop (≠ 0)    │
+│  └── area                            │ areaID (backbone = 0)            │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ Ví dụ với R1 (hình mesh 10 router): │                                   │
+│  routingTable[R2]  → cost=1         │ nextHop = 2 (Router ID của R2)   │
+│  routingTable[R4]  → cost=1         │ nextHop = 4 (Router ID của R4)   │
+│  routingTable[R5]  → cost=2 (R1→R2→R5 hoặc R1→R4→R5)                  │
+│                     hoặc cost=2      │ nextHop = 2 hoặc 4 (R2 hoặc R4)  │
+│  routingTable[R3]  → cost=2         │ nextHop = 2 (qua R2)             │
+│  routingTable[R6]  → cost=2         │ nextHop = 4 (qua R4)             │
+│  routingTable[R7]  → cost=3         │ nextHop = 4 (qua R4→R5→R7)      │
+│  routingTable[R8]  → cost=3         │ nextHop = 2 (qua R2→R3→R8)     │
+│  routingTable[R9]  → cost=3         │ nextHop = R2 (qua R2→R3 hoặc   │
+│                                      │             R2→R5, cùng gate)  │
+│                                      │ hoặc R4 (qua R4→R5)            │
+│  routingTable[R10] → cost=4         │ nextHop = 2 (qua R2→R3→R8→R10) │
+│                                      │                                   │
+│  (*) Cost = metric = 1 mỗi hop                                          │
+│  ECMP (Equal-Cost MultiPath):                                            │
+│   R1→R5: cost=2 qua R2 (R1→R2→R5) hoặc R4 (R1→R4→R5)                   │
+│     → 2 next-hop (R2 và R4) trong routing table                         │
+│   R1→R9: cost=3 qua R2→R3, R2→R5, hoặc R4→R5                          │
+│     → 3 predecessors, 2 next-hop distinct (R2 và R4)                    │
+├──────────────────────────────────────┼───────────────────────────────────┤
+│ spfTimer                             │ nullptr (đã xóa sau khi cháy)    │
+│ LSDB (routerLSAs[])                  │ Không thay đổi (giữ nguyên)      │
+│ Neighbor states                      │ Full (giữ nguyên)               │
+│ Interface states                     │ PointToPoint (giữ nguyên)       │
+│ Data forwarding                      │ CHƯA CÓ (Phase 2b)              │
+└──────────────────────────────────────┴───────────────────────────────────┘
+
+Điều kiện chuyển sang Phase 2b (Data Forwarding):
+  - SPF đã chạy thành công
+  - Routing table có đủ entry cho mọi router trong network
+  - Có thể verify bằng cách dump routing table

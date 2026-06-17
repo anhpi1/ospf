@@ -1,13 +1,13 @@
 #
-# OMNeT++/OMNEST Makefile for ospf
+# OMNeT++/OMNEST Makefile for ospf_sim
 #
 # This file was generated with the command:
-#  opp_makemake -f
+#  opp_makemake -f --deep -o ospf_sim -O out -I.
 #
 
 # Name of target to be created (-o option)
 TARGET_DIR = .
-TARGET_NAME = ospf$(D)
+TARGET_NAME = ospf_sim$(D)
 TARGET = $(TARGET_NAME)$(EXE_SUFFIX)
 TARGET_FILES = $(TARGET_DIR)/$(TARGET)
 
@@ -17,7 +17,7 @@ USERIF_LIBS = $(ALL_ENV_LIBS) # that is, $(QTENV_LIBS) $(CMDENV_LIBS)
 #USERIF_LIBS = $(QTENV_LIBS)
 
 # C++ include paths (with -I)
-INCLUDE_PATH =
+INCLUDE_PATH = -I.
 
 # Additional object and library files to link with
 EXTRA_OBJS =

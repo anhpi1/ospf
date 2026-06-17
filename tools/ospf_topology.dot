@@ -1,0 +1,18 @@
+graph OSPF {
+  rankdir=LR;
+  node [shape=circle, style=filled, fillcolor=lightyellow, fontsize=14, width=0.6];
+  edge [fontsize=12, penwidth=2];
+
+  n1 -- n2 [label="cost=1", len=2];
+  n1 -- n4 [label="cost=1", len=2];
+  n2 -- n3 [label="cost=1", len=2];
+  n2 -- n4 [label="cost=1", len=2];
+  n2 -- n5 [label="cost=1", len=2];
+  n3 -- n8 [label="cost=1", len=2];
+  n3 -- n9 [label="cost=1", len=2];
+  n4 -- n5 [label="cost=1", len=2];
+  n4 -- n6 [label="cost=1", len=2];
+  n5 -- n7 [label="cost=1", len=2];
+  n5 -- n9 [label="cost=1", len=2];
+  n8 -- n10 [label="cost=1", len=2];
+}
