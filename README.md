@@ -1,8 +1,8 @@
 # OSPFv2 Simulation trên OMNeT++ 6.4
 
 Mô phỏng giao thức OSPFv2 (RFC 2328) single-area, P2P links, 10 router + 10 client.
+ 
 
----
 
 ## Tài liệu quan trọng nhất
 
@@ -14,7 +14,8 @@ Mô phỏng giao thức OSPFv2 (RFC 2328) single-area, P2P links, 10 router + 10
 | [`docs/plan thinking/DECISION-LOG.md`](docs/plan%20thinking/DECISION-LOG.md) | **Nhật ký kỹ thuật.** Ghi lại từng quyết định thiết kế, lý do, và hệ quả. Ví dụ: tại sao chọn cost random 1-30, tại sao không dùng INET, vì sao không thể implement toàn bộ RFC 2328. |
 | [`docs/nhật kí kĩ thuật.txt`](docs/nh%E1%BA%ADt%20k%C3%AD%20k%C4%A9%20thu%E1%BA%ADt.txt) | **Nhật ký coding thực tế.** Ghi lại giơi hạn của omnetpp và hướng xử lý
 
--
+
+
 ## Cấu trúc quan trọng
 
 | Đường dẫn | Mô tả |
@@ -25,7 +26,17 @@ Mô phỏng giao thức OSPFv2 (RFC 2328) single-area, P2P links, 10 router + 10
 | `state_dump/` | Log trạng thái sau mỗi transition — **dữ liệu đầu vào cho tools** |
 | `docs/specs/` | Đặc tả kỹ thuật từng subphase (0 → 1a → 1b1 → 1b2 → 1c → 2a → 2b) |
 
----
+
+
+## Hướng dẫn đọc code
+
+Bắt đầu từ `ospf.h` — lớp `routerOspf` chỉ có 3 hàm chính:
+
+- **`initialize()`** — khởi tạo state, gửi Hello đầu tiên, khởi tạo các bộ timer
+- **`handleMessage(cMessage *msg)`** chứa luồng xử lý chính thay đổi các trạng thái mọi gói tin đều được xử lý ở đây
+- **`finish()`** — dọn dẹp timer, ghi state dump cuối
+
+
 
 ## Phân tích kết quả — Chỉ dùng tool, không dùng IDE
 
@@ -57,7 +68,6 @@ python3 tools/show_routes.py
 Mỗi tool đọc từ `state_dump/`, xử lý, và ghi kết quả ra file riêng.  
 Không cần mở IDE — tất cả đều chạy từ command line.
 
----
 
 ## Build và chạy
 
@@ -66,7 +76,6 @@ source /home/k/omnetpp-6.4.0/setenv
 make
 ./ospf_sim -c General -u Cmdenv --sim-time-limit=60s
 ```
---
 
 ## Giới hạn dự án (scope)
 
@@ -78,5 +87,3 @@ Dự án chỉ implement một tập con của OSPFv2. Đọc QUESTIONS.md để
 - **Timer rút gọn 10×** — Hello 1s (chuẩn 10s), Dead 4s (chuẩn 40s), ...
 - **No checksum** — môi trường simulation không có lỗi bit
 - **No authentication** — không cần trong simulation
-
----

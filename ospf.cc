@@ -6,371 +6,6 @@
 
 Define_Module(routerOspf);
 
-// MaximumAge (RFC 2328 Section 13.2): LSA hết hạn
-static const uint32_t MAX_AGE = 3600;
-// INFINITY dùng cho dist[] trong SPF
-static const uint32_t SPF_INFINITY = 0xFFFFFFFF;
-
-
-//
-// calcNextHop: tìm gate index kết nối trực tiếp tới destId (Section 16.1.1)
-// Chỉ gọi khi parent == self (direct neighbor), V != self dùng inherit.
-//
-unsigned int routerOspf::calcNextHop(uint32_t destId)
-{
-    for (int i = 0; i < (int)state->interfaces.size(); i++) {
-        NeighborData* nbr = state->interfaces[i].neighbor;
-        if (nbr && nbr->IDNeighbor == destId)
-            return (unsigned int)i;
-    }
-    return UINT_MAX; // không tìm thấy (lỗi)
-}
-
-
-//
-// forwardData: forward data packet using routing table lookup (Section 11.1)
-// payload[0-3] = dest Router ID, payload[4-7] = source Router ID (network byte order)
-// ifIndex = -1 if originated locally (self-message), >=0 if from gate
-//
-void routerOspf::forwardData(Mess* msg, int ifIndex)
-{
-    // Guard: must have 8-byte payload
-    if (msg->getPayloadArraySize() < 8) { delete msg; return; }
-
-    // Parse dest + source
-    uint32_t dest = ((uint32_t)msg->getPayload(0) << 24)
-                  | ((uint32_t)msg->getPayload(1) << 16)
-                  | ((uint32_t)msg->getPayload(2) << 8)
-                  |  msg->getPayload(3);
-    uint32_t srcId = ((uint32_t)msg->getPayload(4) << 24)
-                   | ((uint32_t)msg->getPayload(5) << 16)
-                   | ((uint32_t)msg->getPayload(6) << 8)
-                   |  msg->getPayload(7);
-
-    // A: Arrived at destination?
-    if (dest == routerId) {
-        uint32_t cost = 0;
-        for (auto& e : state->RoutingTable)
-            if (e.destinationType == 'R' && e.destinationId == srcId)
-                { cost = e.cost; break; }
-        state->logTransition("2b", ("Rcvd:" + std::to_string(srcId)
-            + "->self cost=" + std::to_string(cost)).c_str(),
-            simTime().dbl(), ifIndex);
-        delete msg;
-        return;
-    }
-
-    // B: Routing table lookup (Section 11.1 — exact match on Router ID)
-    uint32_t nextHopId = 0;
-    bool found = false;
-    for (auto& e : state->RoutingTable) {
-        if (e.destinationType == 'R' && e.destinationId == dest) {
-            nextHopId = e.nextHop;
-            found = true;
-            break;
-        }
-    }
-    if (!found || nextHopId == 0) {
-        state->logTransition("2b", ("NoRoute:" + std::to_string(dest)).c_str(),
-                             simTime().dbl(), ifIndex);
-        delete msg;
-        return;
-    }
-
-    // C: Map nextHop Router ID -> gate index (reuse calcNextHop pattern)
-    unsigned int gate = UINT_MAX;
-    for (int i = 0; i < (int)state->interfaces.size(); i++) {
-        NeighborData* nbr = state->interfaces[i].neighbor;
-        if (nbr && nbr->IDNeighbor == nextHopId) {
-            gate = (unsigned int)i;
-            break;
-        }
-    }
-    if (gate == UINT_MAX) {
-        state->logTransition("2b", ("NHNotConn:" + std::to_string(nextHopId)).c_str(),
-                             simTime().dbl(), ifIndex);
-        delete msg;
-        return;
-    }
-
-    // D: Forward to next hop
-    state->logTransition("2b", ("Fwd:" + std::to_string(srcId) + "->"
-        + std::to_string(dest) + " g[" + std::to_string(gate) + "]->"
-        + std::to_string(nextHopId)).c_str(),
-        simTime().dbl(), (int)gate);
-    send(msg, "gate$o", gate);
-    // After send: OMNeT++ owns msg — do NOT delete
-}
-
-
-//
-// initForwardingTest: generate 9 data packets, one to each other router (2b)
-// Called when testTimer fires (after SPF has completed)
-//
-void routerOspf::initForwardingTest()
-{
-    // Guard: SPF must have completed (routing table non-empty)
-    if (state->RoutingTable.empty()) {
-        testTimer = new cMessage("testTimer");
-        scheduleAt(simTime() + 0.5, testTimer);
-        return;
-    }
-
-    // Generate 9 test packets (one to each router 1..10 except self)
-    for (uint32_t destId = 1; destId <= 10; destId++) {
-        if (destId == routerId) continue;
-
-        Mess* msg = new Mess("dataTest");
-        msg->setPayloadArraySize(8);
-
-        // Bytes 0-3: destination Router ID
-        msg->setPayload(0, (destId >> 24) & 0xFF);
-        msg->setPayload(1, (destId >> 16) & 0xFF);
-        msg->setPayload(2, (destId >> 8) & 0xFF);
-        msg->setPayload(3, destId & 0xFF);
-
-        // Bytes 4-7: source Router ID (self)
-        msg->setPayload(4, (routerId >> 24) & 0xFF);
-        msg->setPayload(5, (routerId >> 16) & 0xFF);
-        msg->setPayload(6, (routerId >> 8) & 0xFF);
-        msg->setPayload(7, routerId & 0xFF);
-
-        state->logTransition("2b", ("Test:" + std::to_string(routerId)
-            + "->" + std::to_string(destId)).c_str(),
-            simTime().dbl(), -1);
-
-        forwardData(msg, -1);  // -1 = originated from this router
-    }
-}
-
-
-//
-// calculateSpf: tính shortest-path tree + build routing table
-// Stage 1: Dijkstra trên transit vertices (Section 16.1)
-// Stage 2: Thêm stub networks (Section 16.1)
-//
-void routerOspf::calculateSpf()
-{
-    // === STAGE 1: Dijkstra ===
-    // Cấu trúc dữ liệu tạm (biến local)
-    std::map<uint32_t, uint32_t> dist;               // distance từ root
-    std::map<uint32_t, std::vector<uint32_t>> prev;  // predecessors (ECMP)
-    std::map<uint32_t, unsigned int> nh;              // next-hop gate index
-    std::set<uint32_t> inTree;                       // đã trong SPF tree
-    // Priority queue: (distance, vertexId), min-heap
-    using P = std::pair<uint32_t, uint32_t>;
-    std::priority_queue<P, std::vector<P>, std::greater<P>> pq;
-
-    // Input validation (Section 16.1)
-    if (state->area.routerLSAs.empty()) return;    // LSDB rỗng → không tính được
-    bool selfFound = false;
-    for (const auto& lsa : state->area.routerLSAs)
-        if (lsa.header.advertisingRouter == routerId) { selfFound = true; break; }
-    if (!selfFound) return;                        // self không có LSA → không tính
-
-    // Khởi tạo: tất cả dist = INFINITY
-    for (const auto& lsa : state->area.routerLSAs)
-        dist[lsa.header.advertisingRouter] = SPF_INFINITY;
-    dist[routerId] = 0;
-    pq.push({0, routerId});
-    state->area.transitCapability = false; // Section 16.1 step (1)
-
-    // Dijkstra loop (Section 16.1 steps 2-5)
-    while (!pq.empty()) {
-        auto [d, V] = pq.top(); pq.pop();
-        if (inTree.count(V)) continue;
-        inTree.insert(V);
-
-        // Tìm Router-LSA của V
-        LSA* lsaV = nullptr;
-        for (auto& lsa : state->area.routerLSAs) {
-            if (lsa.header.advertisingRouter == V) {
-                lsaV = &lsa;
-                break;
-            }
-        }
-        if (!lsaV || lsaV->header.age >= MAX_AGE) continue;
-
-        // Kiểm tra bit V (virtual link) — single-area bỏ qua
-        if (lsaV->flags & LSA_FLAG_V)
-            state->area.transitCapability = true;
-
-        // Duyệt từng link (Section 16.1 step 2)
-        for (const auto& link : lsaV->links) {
-            if (link.type == LINK_STUB)
-                continue; // stub → Stage 2
-
-            if (link.type == LINK_P2P) {
-                uint32_t W = link.linkID;
-
-                // Bidirectional check + MaxAge check (Section 16.1 step 2b)
-                LSA* lsaW = nullptr;
-                for (auto& lsa : state->area.routerLSAs) {
-                    if (lsa.header.advertisingRouter == W) {
-                        lsaW = &lsa;
-                        break;
-                    }
-                }
-                if (!lsaW || lsaW->header.age >= MAX_AGE) continue;
-                // Kiểm tra link ngược W→V
-                bool backLink = false;
-                for (const auto& wl : lsaW->links) {
-                    if (wl.type == LINK_P2P && wl.linkID == V) {
-                        backLink = true;
-                        break;
-                    }
-                }
-                if (!backLink) continue;
-
-                // W đã trong tree? (Section 16.1 step 2c)
-                if (inTree.count(W)) continue;
-
-                // Tính D = dist[V] + metric (Section 16.1 step 2d)
-                uint32_t D = d + link.metric;
-                if (D < dist[V]) // overflow check
-                    D = SPF_INFINITY;
-
-                if (D > dist[W]) continue; // đường dài hơn → skip
-
-                if (D == dist[W]) {
-                    // ECMP: thêm predecessor (Section 16.1 step 2d)
-                    // RoutingTableEntry chỉ có single nextHop → bỏ qua
-                    prev[W].push_back(V);
-                } else {
-                    // D < dist[W] hoặc W chưa có: đường tốt hơn
-                    dist[W] = D;
-                    prev[W] = {V};
-                    // Tính next-hop: V == self → direct, V != self → inherit
-                    if (V == routerId)
-                        nh[W] = calcNextHop(W);
-                    else
-                        nh[W] = nh[V];
-                    pq.push({D, W});
-                }
-            }
-            // LINK_TRANSIT: bỏ qua (P2P only)
-        }
-    }
-
-    // Build SpfVertices tree từ kết quả Dijkstra
-    state->area.spfVertices.clear();
-    std::map<uint32_t, int> vertexIdx; // routerId → index trong spfVertices
-
-    // Pre-allocate: đếm số đỉnh reachable
-    for (auto& kv : dist) {
-        if (kv.second < SPF_INFINITY) {
-            SpfVertex sv;
-            sv.vertexId = kv.first;
-            sv.distance = (uint16_t)kv.second;
-            sv.nextHop = nh.count(kv.first) ? nh[kv.first] : UINT_MAX;
-            sv.parent = nullptr;
-            state->area.spfVertices.push_back(sv);
-            vertexIdx[kv.first] = (int)state->area.spfVertices.size() - 1;
-        }
-    }
-
-    // Gắn parent/neighbors pointers (sau khi vector ổn định)
-    for (auto& sv : state->area.spfVertices) {
-        if (sv.vertexId == routerId) continue; // root
-        auto it = prev.find(sv.vertexId);
-        if (it == prev.end() || it->second.empty()) continue;
-        uint32_t parentId = it->second[0]; // lấy predecessor đầu tiên
-        auto pi = vertexIdx.find(parentId);
-        if (pi != vertexIdx.end()) {
-            sv.parent = &state->area.spfVertices[pi->second];
-            state->area.spfVertices[pi->second].neighbors.push_back(&sv);
-        }
-    }
-
-    // === BUILD ROUTING TABLE (Section 16 step 4) ===
-    state->RoutingTable.clear();
-
-    // Router entries: mỗi reachable router ≠ self
-    for (auto& kv : dist) {
-        uint32_t dest = kv.first;
-        uint32_t cost = kv.second;
-        if (cost >= SPF_INFINITY || dest == routerId) continue;
-
-        RoutingTableEntry e;
-        e.destinationType = 'R';
-        e.destinationId = dest;
-        e.addressMask = 0;
-        e.area = state->area.areaID;
-        e.pathType = PATH_INTRA_AREA;
-        e.cost = cost;
-        // Chuyển gate index → Router ID
-        auto ni = nh.find(dest);
-        if (ni != nh.end() && ni->second < state->interfaces.size()
-            && state->interfaces[ni->second].neighbor)
-            e.nextHop = state->interfaces[ni->second].neighbor->IDNeighbor;
-        else
-            e.nextHop = 0;
-        state->RoutingTable.push_back(e);
-    }
-
-    // === STAGE 2: Stub networks (Section 16.1) ===
-    for (auto& kv : dist) {
-        uint32_t V = kv.first;
-        uint32_t dV = kv.second;
-        if (dV >= SPF_INFINITY) continue;
-
-        // Tìm Router-LSA của V
-        LSA* lsaV = nullptr;
-        for (auto& lsa : state->area.routerLSAs) {
-            if (lsa.header.advertisingRouter == V) {
-                lsaV = &lsa;
-                break;
-            }
-        }
-        if (!lsaV) continue;
-
-        // Duyệt từng stub link
-        for (const auto& link : lsaV->links) {
-            if (link.type != LINK_STUB) continue;
-
-            uint32_t stubId = link.linkID;
-            uint32_t stubCost = dV + link.metric;
-            unsigned int stubNh = (V == routerId) ? UINT_MAX : nh[V];
-
-            // Kiểm tra xem đã có route cho stub này chưa
-            bool found = false;
-            for (auto& entry : state->RoutingTable) {
-                if (entry.destinationType == 'N' && entry.destinationId == stubId) {
-                    found = true;
-                    if (stubCost < entry.cost) {
-                        entry.cost = stubCost;
-                        if (stubNh < state->interfaces.size()
-                            && state->interfaces[stubNh].neighbor)
-                            entry.nextHop = state->interfaces[stubNh].neighbor->IDNeighbor;
-                    }
-                    // stubCost == entry.cost → ECMP (bỏ qua, giữ entry cũ)
-                    break;
-                }
-            }
-            if (!found) {
-                RoutingTableEntry e;
-                e.destinationType = 'N';
-                e.destinationId = stubId;
-                e.addressMask = 0xFFFFFFFF;
-                e.area = state->area.areaID;
-                e.pathType = PATH_INTRA_AREA;
-                e.cost = stubCost;
-                if (stubNh < state->interfaces.size()
-                    && state->interfaces[stubNh].neighbor)
-                    e.nextHop = state->interfaces[stubNh].neighbor->IDNeighbor;
-                else
-                    e.nextHop = 0;
-                state->RoutingTable.push_back(e);
-            }
-        }
-    }
-
-    // Sort routing table theo destinationId
-    std::sort(state->RoutingTable.begin(), state->RoutingTable.end(),
-        [](const RoutingTableEntry& a, const RoutingTableEntry& b) {
-            return a.destinationId < b.destinationId;
-        });
-}
 
 
 void routerOspf::initialize()
@@ -939,4 +574,372 @@ void routerOspf::finish()
     }
     state->printState();
     delete state;
+}
+
+
+
+// MaximumAge (RFC 2328 Section 13.2): LSA hết hạn
+static const uint32_t MAX_AGE = 3600;
+// INFINITY dùng cho dist[] trong SPF
+static const uint32_t SPF_INFINITY = 0xFFFFFFFF;
+
+
+//
+// calcNextHop: tìm gate index kết nối trực tiếp tới destId (Section 16.1.1)
+// Chỉ gọi khi parent == self (direct neighbor), V != self dùng inherit.
+//
+unsigned int routerOspf::calcNextHop(uint32_t destId)
+{
+    for (int i = 0; i < (int)state->interfaces.size(); i++) {
+        NeighborData* nbr = state->interfaces[i].neighbor;
+        if (nbr && nbr->IDNeighbor == destId)
+            return (unsigned int)i;
+    }
+    return UINT_MAX; // không tìm thấy (lỗi)
+}
+
+
+//
+// forwardData: forward data packet using routing table lookup (Section 11.1)
+// payload[0-3] = dest Router ID, payload[4-7] = source Router ID (network byte order)
+// ifIndex = -1 if originated locally (self-message), >=0 if from gate
+//
+void routerOspf::forwardData(Mess* msg, int ifIndex)
+{
+    // Guard: must have 8-byte payload
+    if (msg->getPayloadArraySize() < 8) { delete msg; return; }
+
+    // Parse dest + source
+    uint32_t dest = ((uint32_t)msg->getPayload(0) << 24)
+                  | ((uint32_t)msg->getPayload(1) << 16)
+                  | ((uint32_t)msg->getPayload(2) << 8)
+                  |  msg->getPayload(3);
+    uint32_t srcId = ((uint32_t)msg->getPayload(4) << 24)
+                   | ((uint32_t)msg->getPayload(5) << 16)
+                   | ((uint32_t)msg->getPayload(6) << 8)
+                   |  msg->getPayload(7);
+
+    // A: Arrived at destination?
+    if (dest == routerId) {
+        uint32_t cost = 0;
+        for (auto& e : state->RoutingTable)
+            if (e.destinationType == 'R' && e.destinationId == srcId)
+                { cost = e.cost; break; }
+        state->logTransition("2b", ("Rcvd:" + std::to_string(srcId)
+            + "->self cost=" + std::to_string(cost)).c_str(),
+            simTime().dbl(), ifIndex);
+        delete msg;
+        return;
+    }
+
+    // B: Routing table lookup (Section 11.1 — exact match on Router ID)
+    uint32_t nextHopId = 0;
+    bool found = false;
+    for (auto& e : state->RoutingTable) {
+        if (e.destinationType == 'R' && e.destinationId == dest) {
+            nextHopId = e.nextHop;
+            found = true;
+            break;
+        }
+    }
+    if (!found || nextHopId == 0) {
+        state->logTransition("2b", ("NoRoute:" + std::to_string(dest)).c_str(),
+                             simTime().dbl(), ifIndex);
+        delete msg;
+        return;
+    }
+
+    // C: Map nextHop Router ID -> gate index (reuse calcNextHop pattern)
+    unsigned int gate = UINT_MAX;
+    for (int i = 0; i < (int)state->interfaces.size(); i++) {
+        NeighborData* nbr = state->interfaces[i].neighbor;
+        if (nbr && nbr->IDNeighbor == nextHopId) {
+            gate = (unsigned int)i;
+            break;
+        }
+    }
+    if (gate == UINT_MAX) {
+        state->logTransition("2b", ("NHNotConn:" + std::to_string(nextHopId)).c_str(),
+                             simTime().dbl(), ifIndex);
+        delete msg;
+        return;
+    }
+
+    // D: Forward to next hop
+    state->logTransition("2b", ("Fwd:" + std::to_string(srcId) + "->"
+        + std::to_string(dest) + " g[" + std::to_string(gate) + "]->"
+        + std::to_string(nextHopId)).c_str(),
+        simTime().dbl(), (int)gate);
+    send(msg, "gate$o", gate);
+    // After send: OMNeT++ owns msg — do NOT delete
+}
+
+
+//
+// initForwardingTest: generate 9 data packets, one to each other router (2b)
+// Called when testTimer fires (after SPF has completed)
+//
+void routerOspf::initForwardingTest()
+{
+    // Guard: SPF must have completed (routing table non-empty)
+    if (state->RoutingTable.empty()) {
+        testTimer = new cMessage("testTimer");
+        scheduleAt(simTime() + 0.5, testTimer);
+        return;
+    }
+
+    // Generate 9 test packets (one to each router 1..10 except self)
+    for (uint32_t destId = 1; destId <= 10; destId++) {
+        if (destId == routerId) continue;
+
+        Mess* msg = new Mess("dataTest");
+        msg->setPayloadArraySize(8);
+
+        // Bytes 0-3: destination Router ID
+        msg->setPayload(0, (destId >> 24) & 0xFF);
+        msg->setPayload(1, (destId >> 16) & 0xFF);
+        msg->setPayload(2, (destId >> 8) & 0xFF);
+        msg->setPayload(3, destId & 0xFF);
+
+        // Bytes 4-7: source Router ID (self)
+        msg->setPayload(4, (routerId >> 24) & 0xFF);
+        msg->setPayload(5, (routerId >> 16) & 0xFF);
+        msg->setPayload(6, (routerId >> 8) & 0xFF);
+        msg->setPayload(7, routerId & 0xFF);
+
+        state->logTransition("2b", ("Test:" + std::to_string(routerId)
+            + "->" + std::to_string(destId)).c_str(),
+            simTime().dbl(), -1);
+
+        forwardData(msg, -1);  // -1 = originated from this router
+    }
+}
+
+
+//
+// calculateSpf: tính shortest-path tree + build routing table
+// Stage 1: Dijkstra trên transit vertices (Section 16.1)
+// Stage 2: Thêm stub networks (Section 16.1)
+//
+void routerOspf::calculateSpf()
+{
+    // === STAGE 1: Dijkstra ===
+    // Cấu trúc dữ liệu tạm (biến local)
+    std::map<uint32_t, uint32_t> dist;               // distance từ root
+    std::map<uint32_t, std::vector<uint32_t>> prev;  // predecessors (ECMP)
+    std::map<uint32_t, unsigned int> nh;              // next-hop gate index
+    std::set<uint32_t> inTree;                       // đã trong SPF tree
+    // Priority queue: (distance, vertexId), min-heap
+    using P = std::pair<uint32_t, uint32_t>;
+    std::priority_queue<P, std::vector<P>, std::greater<P>> pq;
+
+    // Input validation (Section 16.1)
+    if (state->area.routerLSAs.empty()) return;    // LSDB rỗng → không tính được
+    bool selfFound = false;
+    for (const auto& lsa : state->area.routerLSAs)
+        if (lsa.header.advertisingRouter == routerId) { selfFound = true; break; }
+    if (!selfFound) return;                        // self không có LSA → không tính
+
+    // Khởi tạo: tất cả dist = INFINITY
+    for (const auto& lsa : state->area.routerLSAs)
+        dist[lsa.header.advertisingRouter] = SPF_INFINITY;
+    dist[routerId] = 0;
+    pq.push({0, routerId});
+    state->area.transitCapability = false; // Section 16.1 step (1)
+
+    // Dijkstra loop (Section 16.1 steps 2-5)
+    while (!pq.empty()) {
+        auto [d, V] = pq.top(); pq.pop();
+        if (inTree.count(V)) continue;
+        inTree.insert(V);
+
+        // Tìm Router-LSA của V
+        LSA* lsaV = nullptr;
+        for (auto& lsa : state->area.routerLSAs) {
+            if (lsa.header.advertisingRouter == V) {
+                lsaV = &lsa;
+                break;
+            }
+        }
+        if (!lsaV || lsaV->header.age >= MAX_AGE) continue;
+
+        // Kiểm tra bit V (virtual link) — single-area bỏ qua
+        if (lsaV->flags & LSA_FLAG_V)
+            state->area.transitCapability = true;
+
+        // Duyệt từng link (Section 16.1 step 2)
+        for (const auto& link : lsaV->links) {
+            if (link.type == LINK_STUB)
+                continue; // stub → Stage 2
+
+            if (link.type == LINK_P2P) {
+                uint32_t W = link.linkID;
+
+                // Bidirectional check + MaxAge check (Section 16.1 step 2b)
+                LSA* lsaW = nullptr;
+                for (auto& lsa : state->area.routerLSAs) {
+                    if (lsa.header.advertisingRouter == W) {
+                        lsaW = &lsa;
+                        break;
+                    }
+                }
+                if (!lsaW || lsaW->header.age >= MAX_AGE) continue;
+                // Kiểm tra link ngược W→V
+                bool backLink = false;
+                for (const auto& wl : lsaW->links) {
+                    if (wl.type == LINK_P2P && wl.linkID == V) {
+                        backLink = true;
+                        break;
+                    }
+                }
+                if (!backLink) continue;
+
+                // W đã trong tree? (Section 16.1 step 2c)
+                if (inTree.count(W)) continue;
+
+                // Tính D = dist[V] + metric (Section 16.1 step 2d)
+                uint32_t D = d + link.metric;
+                if (D < dist[V]) // overflow check
+                    D = SPF_INFINITY;
+
+                if (D > dist[W]) continue; // đường dài hơn → skip
+
+                if (D == dist[W]) {
+                    // ECMP: thêm predecessor (Section 16.1 step 2d)
+                    // RoutingTableEntry chỉ có single nextHop → bỏ qua
+                    prev[W].push_back(V);
+                } else {
+                    // D < dist[W] hoặc W chưa có: đường tốt hơn
+                    dist[W] = D;
+                    prev[W] = {V};
+                    // Tính next-hop: V == self → direct, V != self → inherit
+                    if (V == routerId)
+                        nh[W] = calcNextHop(W);
+                    else
+                        nh[W] = nh[V];
+                    pq.push({D, W});
+                }
+            }
+            // LINK_TRANSIT: bỏ qua (P2P only)
+        }
+    }
+
+    // Build SpfVertices tree từ kết quả Dijkstra
+    state->area.spfVertices.clear();
+    std::map<uint32_t, int> vertexIdx; // routerId → index trong spfVertices
+
+    // Pre-allocate: đếm số đỉnh reachable
+    for (auto& kv : dist) {
+        if (kv.second < SPF_INFINITY) {
+            SpfVertex sv;
+            sv.vertexId = kv.first;
+            sv.distance = (uint16_t)kv.second;
+            sv.nextHop = nh.count(kv.first) ? nh[kv.first] : UINT_MAX;
+            sv.parent = nullptr;
+            state->area.spfVertices.push_back(sv);
+            vertexIdx[kv.first] = (int)state->area.spfVertices.size() - 1;
+        }
+    }
+
+    // Gắn parent/neighbors pointers (sau khi vector ổn định)
+    for (auto& sv : state->area.spfVertices) {
+        if (sv.vertexId == routerId) continue; // root
+        auto it = prev.find(sv.vertexId);
+        if (it == prev.end() || it->second.empty()) continue;
+        uint32_t parentId = it->second[0]; // lấy predecessor đầu tiên
+        auto pi = vertexIdx.find(parentId);
+        if (pi != vertexIdx.end()) {
+            sv.parent = &state->area.spfVertices[pi->second];
+            state->area.spfVertices[pi->second].neighbors.push_back(&sv);
+        }
+    }
+
+    // === BUILD ROUTING TABLE (Section 16 step 4) ===
+    state->RoutingTable.clear();
+
+    // Router entries: mỗi reachable router ≠ self
+    for (auto& kv : dist) {
+        uint32_t dest = kv.first;
+        uint32_t cost = kv.second;
+        if (cost >= SPF_INFINITY || dest == routerId) continue;
+
+        RoutingTableEntry e;
+        e.destinationType = 'R';
+        e.destinationId = dest;
+        e.addressMask = 0;
+        e.area = state->area.areaID;
+        e.pathType = PATH_INTRA_AREA;
+        e.cost = cost;
+        // Chuyển gate index → Router ID
+        auto ni = nh.find(dest);
+        if (ni != nh.end() && ni->second < state->interfaces.size()
+            && state->interfaces[ni->second].neighbor)
+            e.nextHop = state->interfaces[ni->second].neighbor->IDNeighbor;
+        else
+            e.nextHop = 0;
+        state->RoutingTable.push_back(e);
+    }
+
+    // === STAGE 2: Stub networks (Section 16.1) ===
+    for (auto& kv : dist) {
+        uint32_t V = kv.first;
+        uint32_t dV = kv.second;
+        if (dV >= SPF_INFINITY) continue;
+
+        // Tìm Router-LSA của V
+        LSA* lsaV = nullptr;
+        for (auto& lsa : state->area.routerLSAs) {
+            if (lsa.header.advertisingRouter == V) {
+                lsaV = &lsa;
+                break;
+            }
+        }
+        if (!lsaV) continue;
+
+        // Duyệt từng stub link
+        for (const auto& link : lsaV->links) {
+            if (link.type != LINK_STUB) continue;
+
+            uint32_t stubId = link.linkID;
+            uint32_t stubCost = dV + link.metric;
+            unsigned int stubNh = (V == routerId) ? UINT_MAX : nh[V];
+
+            // Kiểm tra xem đã có route cho stub này chưa
+            bool found = false;
+            for (auto& entry : state->RoutingTable) {
+                if (entry.destinationType == 'N' && entry.destinationId == stubId) {
+                    found = true;
+                    if (stubCost < entry.cost) {
+                        entry.cost = stubCost;
+                        if (stubNh < state->interfaces.size()
+                            && state->interfaces[stubNh].neighbor)
+                            entry.nextHop = state->interfaces[stubNh].neighbor->IDNeighbor;
+                    }
+                    // stubCost == entry.cost → ECMP (bỏ qua, giữ entry cũ)
+                    break;
+                }
+            }
+            if (!found) {
+                RoutingTableEntry e;
+                e.destinationType = 'N';
+                e.destinationId = stubId;
+                e.addressMask = 0xFFFFFFFF;
+                e.area = state->area.areaID;
+                e.pathType = PATH_INTRA_AREA;
+                e.cost = stubCost;
+                if (stubNh < state->interfaces.size()
+                    && state->interfaces[stubNh].neighbor)
+                    e.nextHop = state->interfaces[stubNh].neighbor->IDNeighbor;
+                else
+                    e.nextHop = 0;
+                state->RoutingTable.push_back(e);
+            }
+        }
+    }
+
+    // Sort routing table theo destinationId
+    std::sort(state->RoutingTable.begin(), state->RoutingTable.end(),
+        [](const RoutingTableEntry& a, const RoutingTableEntry& b) {
+            return a.destinationId < b.destinationId;
+        });
 }
