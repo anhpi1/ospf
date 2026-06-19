@@ -1,13 +1,13 @@
 #
-# OMNeT++/OMNEST Makefile for ospf_sim
+# OMNeT++/OMNEST Makefile for ospf
 #
 # This file was generated with the command:
-#  opp_makemake -f --deep -o ospf_sim -O out -I.
+#  opp_makemake -f --deep
 #
 
 # Name of target to be created (-o option)
 TARGET_DIR = .
-TARGET_NAME = ospf_sim$(D)
+TARGET_NAME = ospf$(D)
 TARGET = $(TARGET_NAME)$(EXE_SUFFIX)
 TARGET_FILES = $(TARGET_DIR)/$(TARGET)
 
@@ -17,7 +17,7 @@ USERIF_LIBS = $(ALL_ENV_LIBS) # that is, $(QTENV_LIBS) $(CMDENV_LIBS)
 #USERIF_LIBS = $(QTENV_LIBS)
 
 # C++ include paths (with -I)
-INCLUDE_PATH = -I.
+INCLUDE_PATH =
 
 # Additional object and library files to link with
 EXTRA_OBJS =
@@ -31,7 +31,7 @@ PROJECTRELATIVE_PATH =
 O = $(PROJECT_OUTPUT_DIR)/$(CONFIGNAME)/$(PROJECTRELATIVE_PATH)
 
 # Object files for local .cc, .msg and .sm files
-OBJS = $O/ospf.o $O/ospf_struct.o $O/ospf_m.o
+OBJS = $O/client.o $O/ospf.o $O/ospf_struct.o $O/ospf_m.o
 
 # Message files
 MSGFILES = \

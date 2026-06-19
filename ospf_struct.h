@@ -428,11 +428,13 @@ class OspfRouterState {
         std::vector<RoutingTableEntry> RoutingTable;
 
         std::map<uint32_t, uint32_t> externalRoutes; // route AS-external
+        std::string lastStateSubdir;  // thư mục con state_dump gần nhất (vd: "1a")
+        std::string lastStateName;    // tên file state_dump gần nhất (vd: "3_r1_0")
 
         OspfRouterState(uint32_t routerId, int numInterfaces);
         ~OspfRouterState();
 
-        void printState();
+        void printState(const char* subdir = nullptr);
 
         // Log state sau transition, ghi vào state_dump/<subphase>/ (gọi từ handleMessage)
         void logTransition(const char* subphase, const char* event,

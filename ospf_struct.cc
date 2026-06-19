@@ -196,20 +196,22 @@ static const char* ifStateName(int s) {
     }
 }
 
-void OspfRouterState::printState()
+void OspfRouterState::printState(const char* subdir)
 {
     namespace fs = std::filesystem;
-    fs::create_directories("state_dump");
+
+    std::string dir = subdir ? std::string("state_dump/") + subdir : "state_dump";
+    fs::create_directories(dir);
 
     int maxNum = 0;
-    for (const auto& entry : fs::directory_iterator("state_dump")) {
+    for (const auto& entry : fs::directory_iterator(dir)) {
         std::string name = entry.path().stem().string();
         try { int n = std::stoi(name); if (n > maxNum) maxNum = n; }
         catch (...) {}
     }
     int fileNumber = maxNum + 1;
 
-    std::string filename = "state_dump/" + std::to_string(fileNumber) + ".log";
+    std::string filename = dir + "/" + std::to_string(fileNumber) + ".log";
     std::ofstream f(filename);
     if (!f.is_open()) return;
 
@@ -376,6 +378,10 @@ void OspfRouterState::logTransition(const char* subphase, const char* event,
     f << "--- LSDB: " << area.routerLSAs.size() << " Router-LSAs ---\n";
     f << "--- RoutingTable: " << RoutingTable.size() << " entries ---\n";
 
+    lastStateSubdir = subphase;
+    lastStateName = std::to_string(seq)
+                  + "_r" + std::to_string(routerID)
+                  + "_" + std::to_string(ifIndex);
     f.close();
 }
 

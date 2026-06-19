@@ -42,7 +42,7 @@ def parse_events(base, subphases=None):
         d = os.path.join(base, sub)
         if not os.path.isdir(d):
             continue
-        for fn in sorted(os.listdir(d), key=lambda x: int(x.split('_')[0])):
+        for fn in sorted(os.listdir(d), key=lambda x: int(x.split('_')[0].split('.')[0])):
             if not fn.endswith('.log'):
                 continue
             fp = os.path.join(d, fn)

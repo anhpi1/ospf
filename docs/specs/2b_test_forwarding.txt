@@ -200,7 +200,6 @@ CHI TIẾT: FORWARD DATA — routing table lookup (Section 11.1, P2P đơn giả
 │       │   ├── CÓ:
 │       │   │   ├── nextHopId = entry.nextHop
 │       │   │   ├── cost = entry.cost
-│       │   │   └── [ECMP] Nếu có nhiều entry cùng dest (ECMP)?
 │       │   │       └── Chọn nextHop đầu tiên (hoặc round-robin — tùy thiết kế)
 │       │   │
 │       │   └── KHÔNG → unreachable
@@ -438,14 +437,6 @@ LƯU Ý TRIỂN KHAI
 │                         simTime().dbl(), ifIndex);                       │
 │    Mỗi router ghi log → ghép log toàn mạng → trace được đường đi        │
 │                                                                          │
-│ 7. Xử lý ECMP cho forwarding test (Section 16.8):                       │
-│    - ECMP là tính năng OSPF chuẩn: khi có nhiều đường cùng cost đến     │
-│      cùng đích, RFC 2328 cho phép chọn bất kỳ đường nào trong ECMP set  │
-│    - Dự án: routing table chỉ lưu 1 nextHop (RoutingTableEntry.nextHop  │
-│      là uint32_t, không phải vector). Khi ECMP xảy ra, nextHop là       │
-│      predecessor đầu tiên trong SPF — đây là simplification cho test.   │
-│    - Khi verify, CHỈ kiểm tra packet đến đúng đích. KHÔNG kiểm tra       │
-│      packet đi qua đường cụ thể nào — mọi đường ECMP đều hợp lệ.         │
 │      Verify C (đường đi đúng) là tùy chọn, chỉ để debug.                │
 │                                                                          │
 │ 8. Timer testTimer khai báo trong ospf.h:                                │

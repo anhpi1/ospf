@@ -1,0 +1,166 @@
+# OSPFv2 — Mô tả quá trình hoạt động
+
+Dựa trên RFC 2328, phiên bản rút gọn (P2P only, single-area, Router-LSA only).
+Mạng gồm 10 router kết nối P2P.
+
+---
+
+## 1. Khởi tạo
+
+Mỗi router khi khởi động làm các việc sau:
+
+- Interface được bật lên, chuyển từ trạng thái Down → PointToPoint (Section 9.3)
+- InterfaceUp kích hoạt sự kiện originate (Section 12.4 Event 2) → sinh Router-LSA đầu tiên
+- Router-LSA này chỉ chứa stub links (mỗi cổng là 1 stub), chưa có P2P links
+- LSA được lưu trong LSDB local, nhưng chưa thể flood vì chưa có neighbor nào ở trạng thái ≥ Exchange
+- Hello Timer khởi động, router bắt đầu gửi Hello định kỳ ra tất cả cổng
+
+---
+
+## 2. Phase 1a: HELLO — Khám phá neighbor
+
+Mỗi router gửi Hello packet ra tất cả cổng mỗi HelloInterval (10 giây).
+
+Router X nhận được Hello từ Y → xảy ra:
+
+- Nếu Y chưa có trong neighbor list → chuyển neighbor state: Down → Init
+- Kiểm tra tham số Hello (areaID, authentication, helloInterval, deadInterval)
+- Nếu thấy chính X trong Neighbor list của Hello đó → bidirectional → chuyển Init → 2Way
+- Reset inactivity timer (nếu nhận được Hello hợp lệ, Section 10.5)
+
+Trên P2P, không cần chọn DR/BDR. Ngay khi đạt 2Way, router lập tức bắt đầu quá trình Database Exchange (Section 10.4).
+
+---
+
+## 3. Phase 1b1: ExStart + Exchange — Đồng bộ danh sách LSA
+
+Từ 2Way, chuyển ngay sang ExStart (Section 10.3):
+
+- Cả 2 bên gửi DD packet trống với bit I (Init), M (More), MS (Master/Slave)
+- Thương lượng: router có Router ID lớn hơn làm Master, router kia làm Slave
+- Master quyết định DD sequence number ban đầu
+- Sau NegotiationDone → chuyển sang Exchange
+
+Trong Exchange (Section 10.8):
+
+- Master gửi DD packet chứa danh sách LSA header có trong LSDB của nó (từng DD một, mỗi lần gửi 1 header)
+- Slave nhận DD → so sánh LSA header với LSDB của mình:
+  - Nếu Slave có LSA mới hơn → ghi LSA header đó vào databaseSummaryList để gửi lại
+  - Nếu Slave không có LSA đó → ghi vào linkStateRequestList để kéo về sau
+  - Nếu Slave có LSA cũ hơn → ghi vào databaseSummaryList để gửi lại
+- Slave trả lời bằng DD chứa danh sách header của nó
+- Sau khi Master gửi DD cuối (M=0) và Slave cũng gửi xong → ExchangeDone
+
+Trong suốt quá trình, nếu có lỗi SeqNumberMismatch hoặc BadLSReq → quay về ExStart (reset 3 list).
+
+---
+
+## 4. Phase 1b2: Loading — Kéo LSA về
+
+Sau ExchangeDone, router đã biết mình thiếu LSA nào.
+
+- Nếu linkStateRequestList rỗng → vào Full ngay (không cần Loading, Section 10.3)
+- Nếu có thiếu → chuyển Loading và gửi LSR (Link State Request, type 3) chứa danh sách LSA cần (Section 10.7)
+
+Neighbor nhận LSR → kiểm tra LSA có trong LSDB không:
+- Nếu có → gửi LSU (type 4) chứa LSA đầy đủ
+- Nếu không có → BadLSReq → quay về ExStart
+
+Router nhận LSU → xử lý:
+- Validate LSA (checksum, type)
+- So sánh với LSDB: nếu mới hơn → cài vào LSDB, gửi LSAck
+- Gỡ LSA khỏi linkStateRequestList
+- Lặp lại cho đến khi linkStateRequestList rỗng → LoadingDone → Full
+
+---
+
+## 5. Phase 1c: Originate + Flood — Lan truyền LSA
+
+Khi neighbor chuyển sang Full (Section 12.4 Event 4):
+
+- Router originate lại Router-LSA: giữ nguyên stub links cũ, thêm P2P links đến các neighbor đã Full
+- LSA mới (sequence number tăng lên, age=0) được cập nhật trong LSDB local
+- Gọi floodLSA() → gửi LSU chứa LSA mới ra tất cả interface có neighbor ≥ Exchange (Section 13.3)
+
+Khi neighbor (đang ở state ≥ Exchange) nhận LSU (Section 13 Flooding Procedure):
+
+- Validate checksum (Section 13 step 1)
+- Kiểm tra LS age, LS type (Section 13 step 2-4)
+- So sánh với LSDB:
+  - Nếu mới hơn (Section 13.1 so sánh sequence number, checksum, age):
+    - Nếu mới hơn → cài vào LSDB (Section 13 step 5d)
+    - Gửi LSAck (Section 13.5, type 5)
+    - Flood tiếp ra neighbor khác (trừ interface nhận được, split horizon)
+    - LSA được thêm vào linkStateRetransmissionList → schedule rxmtTimer phòng retransmit
+    - So sánh nội dung với LSA cũ (Section 13.2): nếu khác → schedule SPF
+  - Nếu cùng instance → implied ACK (Section 13 step 7a)
+  - Nếu cũ hơn → gửi lại bản mới hơn về cho neighbor (Section 13 step 8)
+
+LSAck nhận được (type 5, Section 13.7):
+- Parse danh sách LSA header
+- Tìm trong linkStateRetransmissionList → nếu khớp → gỡ ra
+- Nếu list rỗng → cancel rxmtTimer
+
+Kết quả: LSA được flood hop-by-hop ra toàn area. Mỗi router nhận được LSA từ neighbor, cài vào LSDB, rồi flood tiếp. Cuối cùng tất cả 10 router có LSDB giống hệt nhau.
+
+---
+
+## 6. Phase 2a: SPF + Routing Table
+
+Khi có LSA mới cài vào LSDB (nội dung thay đổi) → schedule SPF timer (Section 13.2). Timer cháy sau InfTransDelay.
+
+SPF timer cháy → backup routing table cũ → clear → tính lại:
+
+### Stage 1: Dijkstra (Section 16.1)
+
+- Khởi tạo: dist[routerId] = 0, dist[v] = INFINITY cho mỗi router trong LSDB
+- Priority queue chứa (distance, vertexId)
+- Loop:
+  1. Pop (d, V) có d nhỏ nhất, đánh dấu inTree
+  2. Tìm Router-LSA của V trong LSDB
+  3. Duyệt từng link của V:
+     - Link P2P (type=1): lấy W = linkID
+       - Bidirectional check: tìm LSA của W, kiểm tra có link ngược W→V không
+       - Nếu W đã trong tree → skip
+       - D = dist[V] + metric
+       - Nếu D < dist[W] → cập nhật dist[W], prev[W] = V, push vào pq
+       - V == self → nextHop = calcNextHop(W) (gate index trực tiếp)
+       - V != self → nextHop kế thừa từ nextHop[V]
+     - Link Stub (type=3): → dành cho Stage 2
+
+### Stage 2: Stub networks
+
+Duyệt từng Router-LSA, thêm stub link làm leaf của cây SPF:
+- stubId = link.linkID, stubCost = dist[V] + link.metric
+- nextHop kế thừa từ nextHop[V]
+
+### Build routing table (Section 16 step 4)
+
+Với mỗi đỉnh reachable ≠ self:
+- destinationType = 'R', destinationId = vertex, cost = dist[vertex], nextHop
+
+Với mỗi stub network:
+- destinationType = 'N', destinationId = stubId, addressMask = 0xFFFFFFFF
+
+Kết quả routing table gồm: 9 router entries + 18 stub entries, sort theo destinationId.
+
+---
+
+## 7. Phase 2b: Test Forwarding
+
+Sau SPF, mỗi Client gửi data packet đến 9 Client khác (Section 11.1).
+
+Data packet format: payload[0-3] = dest Router ID, payload[4-7] = src Router ID.
+
+Router nhận data packet từ clientGate:
+- Parse dest + src từ payload
+- Nếu dest == self → gửi lên clientGate$o (delivered)
+- Nếu dest != self:
+  - Lookup routing table theo dest Router ID
+  - Nếu tìm thấy → send ra gate tương ứng với nextHop
+  - Nếu không tìm thấy (NoRoute) → drop
+  - Nếu nextHop không kết nối trực tiếp (NHNotConn) → drop
+
+Packet được forward hop-by-hop qua routing table cho đến khi đến đích.
+
+Kết quả: 90/90 packets đến đúng đích.

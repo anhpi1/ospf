@@ -18,7 +18,7 @@ class routerOspf : public cSimpleModule
         uint32_t routerId;
         cMessage* helloTimer;
         cMessage* spfTimer;      // SPF delay timer (Section 16)
-        cMessage* testTimer;     // 2b: forwarding test trigger timer
+        int msgSeq;              // message sequence counter for dump
 
        
     protected:
@@ -32,8 +32,7 @@ class routerOspf : public cSimpleModule
         unsigned int calcNextHop(uint32_t destId); // next-hop gate index cho direct neighbor
         // Phase 2b: Data forwarding test
         void forwardData(Mess* msg, int ifIndex);    // forward data packet (Section 11.1)
-        void initForwardingTest();   
-                         // initiate 9 test packets
+        void dumpMessage(const uint8_t* bytes, size_t len);  // dump raw message to mess/
 };
 
 #endif

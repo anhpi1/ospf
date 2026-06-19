@@ -6,5 +6,6 @@
         "out/**": true
     },
     "files.associations": {},
-    "lldb.showDisassembly": "never"
+    "lldb.showDisassembly": "never",
+    "livePreview.defaultPreviewPath": "/state_timeline.html"
 }

@@ -4,14 +4,14 @@
   16.1 (Calculating the shortest-path tree for an area)
   16.1.1 (The next hop calculation)
   16.2–16.4 (Bỏ qua: inter-area, transit, AS-external — single-area)
-  16.8 (Equal-cost multipath)
+
   A.4.2 (Router-LSA format)
 ================================================================================
 
 Mục tiêu: Từ LSDB đã đồng bộ (sau Phase 1), xây dựng shortest-path tree
   với root = self, sau đó sinh routing table cho forwarding.
   Chỉ intra-area routes (pathType = PATH_INTRA_AREA).
-  Hỗ trợ ECMP (nhiều next-hop cho cùng đích).
+
   SPF schedule khi có LSA mới cài vào LSDB.
 
 Lưu ý scope dự án (xem docs/plan thinking/):
@@ -95,7 +95,7 @@ CHI TIẾT: STAGE 1 — DIJKSTRA TRÊN TRANSIT VERTICES (Section 16.1)
 ├── 1. Khởi tạo (Section 16.1 step 1)
 │   ├── Tạo dist[]: map<routerID → uint32_t>, khởi tạo tất cả = INFINITY
 │   ├── dist[self] = 0
-│   ├── prev[]: map<routerID → vector<routerID>> (danh sách predecessor cho ECMP)
+│   ├── prev[]: map<routerID → uint32_t> (predecessor duy nhất)
 │   ├── nextHop[]: map<routerID → int> (next-hop gate index)
 │   ├── Tập vertices: v = {advertisingRouter của mọi Router-LSA trong LSDB}
 │   ├── Tập tree: rỗng (các vertex đã được chọn vào SPF tree)
@@ -160,19 +160,11 @@ CHI TIẾT: STAGE 1 — DIJKSTRA TRÊN TRANSIT VERTICES (Section 16.1)
 │       │           ├── D > dist[W] hiện tại?
 │       │           │   └── YES → skip (đường này dài hơn đường đã biết)
 │       │           │
-│       │           ├── D == dist[W] hiện tại? (ECMP)
-│       │           │   ├── YES → (Section 16.1 step 2d, case equal)
-│       │           │   │   │   Tính next-hop từ (W, V)
-│       │           │   │   │   Thêm V vào prev[W]
-│       │           │   │   │   Thêm next-hop vào nextHop[W]
-│       │           │   │   │   └── [Ghi chú] ECMP: W có ≥ 2 next-hop khác nhau
-│       │           │   │   │       qua các predecessor khác nhau
-│       │           │   │   └── Không thay đổi dist[W]
 │       │           │   │
 │       │           │   └── D < dist[W] (hoặc W chưa trong candidate)
 │       │           │       ├── (Section 16.1 step 2d, case less)
 │       │           │       ├── dist[W] = D
-│       │           │       ├── prev[W] = {V}
+│       │           │       ├── prev[W] = V
 │       │           │       ├── nextHop[W] = tính next-hop từ (W, V)
 │       │           │       └── Thêm W vào candidate (hoặc update dist trong candidate)
 │       │           │
@@ -245,8 +237,6 @@ CHI TIẾT: STAGE 2 — THÊM STUB NETWORKS (Section 16.1, Stage 2)
 │       │       │   │   │
 │       │       │   │   ├── [So sánh] cost hiện tại của route tới N
 │       │       │   │   │   ├── Nếu cost > bestCost hiện tại → skip
-│       │       │   │   │   ├── Nếu cost == bestCost hiện tại → ECMP:
-│       │       │   │   │   │   thêm nextHop[V] vào route của N
 │       │       │   │   │   └── Nếu cost < bestCost hiện tại →
 │       │       │   │   │       ghi đè: cost = cost, nextHop = nextHop[V]
 │       │       │   │   │
@@ -280,7 +270,6 @@ CHI TIẾT: BUILD ROUTING TABLE (Section 16 step 4)
 │       │   ├── pathType = PATH_INTRA_AREA (1)
 │       │   ├── nextHop = interfaces[nextHop[W]].neighbor.IDNeighbor
 │       │   │   (chuyển gate index → Router ID của neighbor)
-│       │   │   └── [ECMP] Nếu W có nhiều next-hop → thêm tất cả
 │       │   └── area = areaID (backbone)
 │       │
 │       └── [Done] Router tiếp theo
@@ -367,7 +356,7 @@ CHI TIẾT: HÀM SPF CALCULATE (mã giả tự nhiên)
 I — KHỞI TẠO
 │
 ├── dist = {map<routerId, uint32>}    // uint32_t để tránh overflow
-├── prev = {map<routerId, vector<routerId>>}
+├── prev = {map<routerId, uint32_t>}
 ├── nextHop = {map<routerId, unsigned int>}  // gate index
 ├── candidate = priority_queue<pair<uint32, routerId>, greater>
 ├── inTree = {set<routerId>}
@@ -412,13 +401,10 @@ while candidate không empty:
 │   │
 │   │       if newDist > dist[W] (trong candidate): continue
 │   │
-│   │       if newDist == dist[W]:
-│   │           ├── Thêm V vào prev[W]
-│   │           └── Thêm nextHop[V] vào nextHop list của W
 │   │
 │   │       if newDist < dist[W] hoặc W chưa trong candidate:
 │   │           ├── dist[W] = newDist
-│   │           ├── prev[W] = {V}
+│   │           ├── prev[W] = V
 │   │           ├── nextHop[W] = calcNextHop(W, V, self)
 │   │           └── push (newDist, W) vào candidate
 │   │
@@ -463,27 +449,7 @@ IV — KẾT THÚC
 
 
 ===============================================================================
-LƯU Ý THÊM VỀ ECMP
-===============================================================================
 
-ECMP (Equal-Cost MultiPath — Section 16.8)
-│
-├── Khi dist[V→W] == dist[U→W] với V ≠ U và V, U đều trong tree
-│   └── Cả V và U đều là predecessor của W
-│       → W có 2 next-hop khác nhau (qua V và qua U)
-│
-├── [Loop] XỬ LÝ TRONG BUILD ROUTING TABLE
-│   └── Khi tạo route cho W:
-│       ├── Nếu prev[W] có ≥ 2 phần tử
-│       └── Và nextHop qua mỗi predecessor là khác nhau
-│           → Thêm tất cả next-hop vào RoutingTableEntry
-│
-└── [Ghi chú] Dự án P2P, ECMP khả năng thấp
-    (mesh 10 router, link cost cố định = 1 tính từ lúc khởi tạo)
-    Nhưng implement đúng RFC để hỗ trợ
-
-
-===============================================================================
 LƯU Ý: RFC 16.1 step (4) build routing table bên TRONG Dijkstra loop
     cho ABR/ASBR và transit network entries. Single-area P2P không có
     hai loại entry đó → defer ra ngoài loop là valid simplification.
@@ -509,7 +475,7 @@ LƯU Ý TRIỂN KHAI TRONG OMNET++
 │                                                                          │
 │ 3. Cấu trúc dữ liệu tạm trong calculateSpf():                            │
 │    - std::map<uint32_t, uint32_t> dist     // uint32_t tránh overflow     │
-│    - std::map<uint32_t, std::vector<uint32_t>> prev                      │
+│    - std::map<uint32_t, uint32_t> prev                      │
 │    - std::map<uint32_t, unsigned int> nextHop  // gate index             │
 │    - std::set<uint32_t> inTree                                           │
 │    - priority_queue<pair<uint32_t,uint32_t>, ..., greater> pq            │
@@ -595,11 +561,6 @@ tính khi LSDB đã đồng bộ (Phase 1 hoàn tất, tất cả neighbor Full)
 │  routingTable[R10] → cost=4         │ nextHop = 2 (qua R2→R3→R8→R10) │
 │                                      │                                   │
 │  (*) Cost = metric = 1 mỗi hop                                          │
-│  ECMP (Equal-Cost MultiPath):                                            │
-│   R1→R5: cost=2 qua R2 (R1→R2→R5) hoặc R4 (R1→R4→R5)                   │
-│     → 2 next-hop (R2 và R4) trong routing table                         │
-│   R1→R9: cost=3 qua R2→R3, R2→R5, hoặc R4→R5                          │
-│     → 3 predecessors, 2 next-hop distinct (R2 và R4)                    │
 ├──────────────────────────────────────┼───────────────────────────────────┤
 │ spfTimer                             │ nullptr (đã xóa sau khi cháy)    │
 │ LSDB (routerLSAs[])                  │ Không thay đổi (giữ nguyên)      │

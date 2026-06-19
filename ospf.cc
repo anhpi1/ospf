@@ -3,6 +3,7 @@
 #include <set>
 #include <algorithm>
 #include <climits>
+#include <cstring>
 
 Define_Module(routerOspf);
 
@@ -35,15 +36,18 @@ void routerOspf::initialize()
     scheduleAt(simTime() + state->interfaces[0].helloInterval, helloTimer);
 
     spfTimer = nullptr;                     // SPF timer chưa dùng
-    testTimer = nullptr;                    // 2b: forwarding test timer
+    msgSeq = 0;                             // message dump counter
 
     // Ghi state dump đầu tiên — trạng thái ngay sau Phase 0 (0.G)
-    state->printState();
+    state->printState("init");
 }
 
 
 void routerOspf::handleMessage(cMessage *msg)
 {
+    // Biến tạm để dump message ở cuối hàm (sau khi xử lý xong)
+    std::vector<uint8_t> dumpBytes;
+
     // xử lý timer
     if (msg->isSelfMessage()) {
         if (msg == helloTimer) {
@@ -85,19 +89,8 @@ void routerOspf::handleMessage(cMessage *msg)
 
             state->logTransition("2a", "SPF completed", simTime().dbl(), -1);
 
-            // 2b: Schedule forwarding test 0.1s after SPF completes
-            if (!testTimer) {
-                testTimer = new cMessage("testTimer");
-                scheduleAt(simTime() + 0.1, testTimer);
-            }
-
-            spfTimer = nullptr;
-            delete msg;
-        } else if (msg == testTimer) {
-            // 2b: testTimer fires → initiate forwarding test
-            initForwardingTest();
-            testTimer = nullptr;
-            delete msg;
+        spfTimer = nullptr;
+        delete msg;
         } else {
             // Tìm timer nào đã cháy: inactivityTimer hoặc rxmtTimer
             bool found = false;
@@ -185,12 +178,58 @@ void routerOspf::handleMessage(cMessage *msg)
 
     //code chính xử lý gói tin
 
+    // Data packet từ Client module (clientGate)
+    if (msg->arrivedOn("clientGate$i")) {
+        Mess* dataMsg = dynamic_cast<Mess*>(msg);
+        if (dataMsg) {
+            int n = dataMsg->getPayloadArraySize();
+            dumpBytes.resize(n);
+            for (int i = 0; i < n; i++) dumpBytes[i] = dataMsg->getPayload(i);
+            forwardData(dataMsg, -2);  // -2 = from client
+            if (!dumpBytes.empty()) dumpMessage(dumpBytes.data(), dumpBytes.size());
+        } else
+            delete msg;
+        return;
+    }
+
     int ifIndex = msg->getArrivalGate()->getIndex();
     InterfaceData* iface = &state->interfaces[ifIndex];
 
     headerOspf hdr;
     std::vector<uint8_t> data;
     uint8_t pktType = OspfMess::parse((Mess*)msg, iface, hdr, data);
+
+    // Dump raw message binary (OSPF header 24B + body)
+    {
+        uint16_t totalLen = 24 + (uint16_t)data.size();
+        std::vector<uint8_t> raw(24 + data.size());
+        raw[0] = hdr.version;
+        raw[1] = pktType;
+        raw[2] = (totalLen >> 8) & 0xFF;
+        raw[3] = totalLen & 0xFF;
+        raw[4] = (hdr.routerId >> 24) & 0xFF;
+        raw[5] = (hdr.routerId >> 16) & 0xFF;
+        raw[6] = (hdr.routerId >> 8) & 0xFF;
+        raw[7] = hdr.routerId & 0xFF;
+        raw[8] = (hdr.areaId >> 24) & 0xFF;
+        raw[9] = (hdr.areaId >> 16) & 0xFF;
+        raw[10] = (hdr.areaId >> 8) & 0xFF;
+        raw[11] = hdr.areaId & 0xFF;
+        raw[12] = (hdr.checksum >> 8) & 0xFF;
+        raw[13] = hdr.checksum & 0xFF;
+        raw[14] = (hdr.authType >> 8) & 0xFF;
+        raw[15] = hdr.authType & 0xFF;
+        raw[16] = (hdr.authData1 >> 24) & 0xFF;
+        raw[17] = (hdr.authData1 >> 16) & 0xFF;
+        raw[18] = (hdr.authData1 >> 8) & 0xFF;
+        raw[19] = hdr.authData1 & 0xFF;
+        raw[20] = (hdr.authData2 >> 24) & 0xFF;
+        raw[21] = (hdr.authData2 >> 16) & 0xFF;
+        raw[22] = (hdr.authData2 >> 8) & 0xFF;
+        raw[23] = hdr.authData2 & 0xFF;
+        std::memcpy(raw.data() + 24, data.data(), data.size());
+        dumpBytes = std::move(raw);
+    }
 
     if (pktType == 1) {
         NeighborData* nbr = iface->neighbor;
@@ -316,6 +355,8 @@ void routerOspf::handleMessage(cMessage *msg)
             // 1c: ExchangeDone→Full → originate Router-LSA (Section 12.4 Event 4)
             if (wasFull) {
                 state->originateRouterLSA();
+                state->logTransition("1c", "Originate+Flood (1st Full)",
+                                     simTime().dbl(), ifIndex);
                 for (auto& lsa : state->area.routerLSAs) {
                     if (lsa.header.advertisingRouter == routerId) {
                         linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
@@ -434,6 +475,8 @@ void routerOspf::handleMessage(cMessage *msg)
 
             // 1c: Neighbor đầu tiên Full → originate Router-LSA (Section 12.4 Event 4)
             state->originateRouterLSA();
+            state->logTransition("1c", "Originate+Flood (1st Full)",
+                                 simTime().dbl(), ifIndex);
             // Flood LSA mới ra tất cả neighbor
             for (auto& lsa : state->area.routerLSAs) {
                 if (lsa.header.advertisingRouter == routerId) {
@@ -456,6 +499,8 @@ void routerOspf::handleMessage(cMessage *msg)
 
         // 1c: Flood LSA mới ra neighbor khác (Section 13.3 step (5b))
         if (!lsuRes.newLsas.empty()) {
+            state->logTransition("1c", "FloodFwd",
+                                 simTime().dbl(), ifIndex);
             for (const auto& lsaHdr : lsuRes.newLsas) {
                 // Tra LSDB để lấy LSA đầy đủ
                 for (auto& lsa : state->area.routerLSAs) {
@@ -543,15 +588,38 @@ void routerOspf::handleMessage(cMessage *msg)
     // 2b: Data packet (not OSPF protocol type 1-5)
     else if (pktType == 0) {
         Mess* dataMsg = dynamic_cast<Mess*>(msg);
-        if (dataMsg)
+        if (dataMsg) {
+            int n = dataMsg->getPayloadArraySize();
+            dumpBytes.resize(n);
+            for (int i = 0; i < n; i++) dumpBytes[i] = dataMsg->getPayload(i);
             forwardData(dataMsg, ifIndex);
+            if (!dumpBytes.empty()) dumpMessage(dumpBytes.data(), dumpBytes.size());
+        }
         else
             delete msg;
         return; // forwardData handles send/delete; don't fall to delete msg
     }
 
+    if (!dumpBytes.empty()) dumpMessage(dumpBytes.data(), dumpBytes.size());
     delete msg;
     
+}
+
+void routerOspf::dumpMessage(const uint8_t* bytes, size_t len)
+{
+    namespace fs = std::filesystem;
+
+    msgSeq++;
+    std::string dir = "mess/" + state->lastStateSubdir;
+    fs::create_directories(dir);
+
+    std::string path = dir + "/" + state->lastStateName
+                     + "__a" + std::to_string(msgSeq) + ".bin";
+    std::ofstream f(path, std::ios::binary);
+    if (f.is_open()) {
+        f.write((const char*)bytes, len);
+        f.close();
+    }
 }
 
 void routerOspf::finish()
@@ -561,10 +629,6 @@ void routerOspf::finish()
         cancelAndDelete(spfTimer);
         spfTimer = nullptr;
     }
-    if (testTimer) {
-        cancelAndDelete(testTimer);
-        testTimer = nullptr;
-    }
     for (auto& iface : state->interfaces) {
         NeighborData* nbr = iface.neighbor;
         if (nbr) {
@@ -572,7 +636,7 @@ void routerOspf::finish()
             if (nbr->rxmtTimer) cancelAndDelete(nbr->rxmtTimer);
         }
     }
-    state->printState();
+    state->printState("finish");
     delete state;
 }
 
@@ -619,6 +683,12 @@ void routerOspf::forwardData(Mess* msg, int ifIndex)
                    | ((uint32_t)msg->getPayload(6) << 8)
                    |  msg->getPayload(7);
 
+    // Log test initiation (from Client, was initForwardingTest)
+    if (ifIndex == -2) {
+        state->logTransition("2b", ("Test:" + std::to_string(srcId)
+            + "->" + std::to_string(dest)).c_str(), simTime().dbl(), -1);
+    }
+
     // A: Arrived at destination?
     if (dest == routerId) {
         uint32_t cost = 0;
@@ -628,7 +698,8 @@ void routerOspf::forwardData(Mess* msg, int ifIndex)
         state->logTransition("2b", ("Rcvd:" + std::to_string(srcId)
             + "->self cost=" + std::to_string(cost)).c_str(),
             simTime().dbl(), ifIndex);
-        delete msg;
+        // Forward to local Client module
+        send(msg, "clientGate$o");
         return;
     }
 
@@ -679,44 +750,6 @@ void routerOspf::forwardData(Mess* msg, int ifIndex)
 // initForwardingTest: generate 9 data packets, one to each other router (2b)
 // Called when testTimer fires (after SPF has completed)
 //
-void routerOspf::initForwardingTest()
-{
-    // Guard: SPF must have completed (routing table non-empty)
-    if (state->RoutingTable.empty()) {
-        testTimer = new cMessage("testTimer");
-        scheduleAt(simTime() + 0.5, testTimer);
-        return;
-    }
-
-    // Generate 9 test packets (one to each router 1..10 except self)
-    for (uint32_t destId = 1; destId <= 10; destId++) {
-        if (destId == routerId) continue;
-
-        Mess* msg = new Mess("dataTest");
-        msg->setPayloadArraySize(8);
-
-        // Bytes 0-3: destination Router ID
-        msg->setPayload(0, (destId >> 24) & 0xFF);
-        msg->setPayload(1, (destId >> 16) & 0xFF);
-        msg->setPayload(2, (destId >> 8) & 0xFF);
-        msg->setPayload(3, destId & 0xFF);
-
-        // Bytes 4-7: source Router ID (self)
-        msg->setPayload(4, (routerId >> 24) & 0xFF);
-        msg->setPayload(5, (routerId >> 16) & 0xFF);
-        msg->setPayload(6, (routerId >> 8) & 0xFF);
-        msg->setPayload(7, routerId & 0xFF);
-
-        state->logTransition("2b", ("Test:" + std::to_string(routerId)
-            + "->" + std::to_string(destId)).c_str(),
-            simTime().dbl(), -1);
-
-        forwardData(msg, -1);  // -1 = originated from this router
-    }
-}
-
-
-//
 // calculateSpf: tính shortest-path tree + build routing table
 // Stage 1: Dijkstra trên transit vertices (Section 16.1)
 // Stage 2: Thêm stub networks (Section 16.1)
@@ -726,7 +759,7 @@ void routerOspf::calculateSpf()
     // === STAGE 1: Dijkstra ===
     // Cấu trúc dữ liệu tạm (biến local)
     std::map<uint32_t, uint32_t> dist;               // distance từ root
-    std::map<uint32_t, std::vector<uint32_t>> prev;  // predecessors (ECMP)
+    std::map<uint32_t, uint32_t> prev;               // predecessor
     std::map<uint32_t, unsigned int> nh;              // next-hop gate index
     std::set<uint32_t> inTree;                       // đã trong SPF tree
     // Priority queue: (distance, vertexId), min-heap
@@ -804,21 +837,15 @@ void routerOspf::calculateSpf()
 
                 if (D > dist[W]) continue; // đường dài hơn → skip
 
-                if (D == dist[W]) {
-                    // ECMP: thêm predecessor (Section 16.1 step 2d)
-                    // RoutingTableEntry chỉ có single nextHop → bỏ qua
-                    prev[W].push_back(V);
-                } else {
-                    // D < dist[W] hoặc W chưa có: đường tốt hơn
-                    dist[W] = D;
-                    prev[W] = {V};
-                    // Tính next-hop: V == self → direct, V != self → inherit
-                    if (V == routerId)
-                        nh[W] = calcNextHop(W);
-                    else
-                        nh[W] = nh[V];
-                    pq.push({D, W});
-                }
+                // D < dist[W] hoặc W chưa có: đường tốt hơn
+                dist[W] = D;
+                prev[W] = V;
+                // Tính next-hop: V == self → direct, V != self → inherit
+                if (V == routerId)
+                    nh[W] = calcNextHop(W);
+                else
+                    nh[W] = nh[V];
+                pq.push({D, W});
             }
             // LINK_TRANSIT: bỏ qua (P2P only)
         }
@@ -845,8 +872,8 @@ void routerOspf::calculateSpf()
     for (auto& sv : state->area.spfVertices) {
         if (sv.vertexId == routerId) continue; // root
         auto it = prev.find(sv.vertexId);
-        if (it == prev.end() || it->second.empty()) continue;
-        uint32_t parentId = it->second[0]; // lấy predecessor đầu tiên
+        if (it == prev.end()) continue;
+        uint32_t parentId = it->second; // predecessor duy nhất
         auto pi = vertexIdx.find(parentId);
         if (pi != vertexIdx.end()) {
             sv.parent = &state->area.spfVertices[pi->second];
@@ -915,7 +942,6 @@ void routerOspf::calculateSpf()
                             && state->interfaces[stubNh].neighbor)
                             entry.nextHop = state->interfaces[stubNh].neighbor->IDNeighbor;
                     }
-                    // stubCost == entry.cost → ECMP (bỏ qua, giữ entry cũ)
                     break;
                 }
             }
