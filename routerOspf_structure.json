@@ -1,0 +1,435 @@
+{
+  "name": "routerOspf",
+  "sourceFiles": [
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf.ned",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf.h",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf.cc",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf_struct.h",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf_struct.cc",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf.msg",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf_m.h",
+    "/home/k/omnetpp-6.4.0/workspace/ospf/ospf_m.cc"
+  ],
+  "nedDefinition": {
+    "type": "simple",
+    "name": "routerOspf",
+    "gates": [
+      { "name": "gate", "direction": "inout", "isVector": true },
+      { "name": "clientGate", "direction": "inout", "isVector": false }
+    ]
+  },
+  "classDefinition": {
+    "name": "routerOspf",
+    "baseClass": "cSimpleModule",
+    "file": "ospf.h",
+    "fields": [
+      { "name": "state", "type": "OspfRouterState*", "visibility": "private", "description": "Trạng thái OSPF của router" },
+      { "name": "routerId", "type": "uint32_t", "visibility": "private", "description": "Router ID" },
+      { "name": "helloTimer", "type": "cMessage*", "visibility": "private", "description": "Timer gửi Hello định kỳ" },
+      { "name": "spfTimer", "type": "cMessage*", "visibility": "private", "description": "SPF delay timer (Section 16)" }
+    ],
+    "methods": [
+      "initialize() override",
+      "handleMessage(cMessage *msg) override",
+      "finish() override",
+      "calculateSpf() — Dijkstra Stage 1 + Stage 2 + build routing table",
+      "calcNextHop(uint32_t destId) — next-hop gate index cho direct neighbor",
+      "forwardData(Mess* msg, int ifIndex) — forward data packet (Section 11.1)"
+    ]
+  },
+  "enums": [
+    {
+      "name": "OspfNeighborState",
+      "type": "uint8_t",
+      "values": [
+        { "name": "NBR_DOWN", "value": 0 },
+        { "name": "NBR_ATTEMPT", "value": 1 },
+        { "name": "NBR_INIT", "value": 2 },
+        { "name": "NBR_TWOWAY", "value": 3 },
+        { "name": "NBR_EXSTART", "value": 4 },
+        { "name": "NBR_EXCHANGE", "value": 5 },
+        { "name": "NBR_LOADING", "value": 6 },
+        { "name": "NBR_FULL", "value": 7 }
+      ],
+      "description": "Trạng thái máy trạng thái neighbor (RFC 2328 Section 10)"
+    },
+    {
+      "name": "OspfInterfaceState",
+      "type": "uint8_t",
+      "values": [
+        { "name": "IF_DOWN", "value": 0 },
+        { "name": "IF_LOOPBACK", "value": 1 },
+        { "name": "IF_WAITING", "value": 2 },
+        { "name": "IF_POINTTOPOINT", "value": 3 },
+        { "name": "IF_DROTHER", "value": 4 },
+        { "name": "IF_BACKUP", "value": 5 },
+        { "name": "IF_DR", "value": 6 }
+      ],
+      "description": "Trạng thái máy trạng thái interface (RFC 2328 Section 9)"
+    },
+    {
+      "name": "OspfRouterLinkType",
+      "type": "uint8_t",
+      "values": [
+        { "name": "LINK_P2P", "value": 1, "description": "Point-to-point" },
+        { "name": "LINK_TRANSIT", "value": 2, "description": "Transit network" },
+        { "name": "LINK_STUB", "value": 3, "description": "Stub network" },
+        { "name": "LINK_VIRTUAL", "value": 4, "description": "Virtual link" }
+      ]
+    },
+    {
+      "name": "OspfPathType",
+      "type": "uint8_t",
+      "values": [
+        { "name": "PATH_INTRA_AREA", "value": 1 },
+        { "name": "PATH_INTER_AREA", "value": 2 },
+        { "name": "PATH_TYPE1_EXT", "value": 3 },
+        { "name": "PATH_TYPE2_EXT", "value": 4 }
+      ]
+    },
+    {
+      "name": "OspfOptionsBit",
+      "type": "uint8_t",
+      "values": [
+        { "name": "OPT_E", "value": "0x02", "description": "ExternalRoutingCapability (bit 1)" },
+        { "name": "OPT_MC", "value": "0x04", "description": "Multicast (bit 2)" },
+        { "name": "OPT_NP", "value": "0x08", "description": "NSSA/Propagate (bit 3)" },
+        { "name": "OPT_EA", "value": "0x10", "description": "External-Attributes (bit 4)" },
+        { "name": "OPT_DC", "value": "0x20", "description": "Demand Circuits (bit 5)" }
+      ]
+    },
+    {
+      "name": "OspfDDFlagBit",
+      "type": "uint8_t",
+      "values": [
+        { "name": "DD_MS", "value": "0x01", "description": "Master/Slave (bit 0)" },
+        { "name": "DD_M", "value": "0x02", "description": "More (bit 1)" },
+        { "name": "DD_I", "value": "0x04", "description": "Init (bit 2)" }
+      ]
+    },
+    {
+      "name": "OspfRouterLSAFlagBit",
+      "type": "uint8_t",
+      "values": [
+        { "name": "LSA_FLAG_B", "value": "0x01", "description": "Border router (bit 0)" },
+        { "name": "LSA_FLAG_E", "value": "0x02", "description": "External router (bit 1)" },
+        { "name": "LSA_FLAG_V", "value": "0x04", "description": "Virtual link endpoint (bit 2)" }
+      ]
+    }
+  ],
+  "structs": [
+    {
+      "name": "headerOspf",
+      "description": "OSPF packet header (RFC A.3.1)",
+      "fields": [
+        { "name": "version", "type": "uint8_t" },
+        { "name": "type", "type": "uint8_t" },
+        { "name": "length", "type": "uint16_t" },
+        { "name": "routerId", "type": "uint32_t" },
+        { "name": "areaId", "type": "uint32_t" },
+        { "name": "checksum", "type": "uint16_t" },
+        { "name": "authType", "type": "uint16_t" },
+        { "name": "authData1", "type": "uint32_t" },
+        { "name": "authData2", "type": "uint32_t" }
+      ]
+    },
+    {
+      "name": "LSAHeader",
+      "description": "LSA header (RFC A.4.1)",
+      "fields": [
+        { "name": "age", "type": "uint16_t" },
+        { "name": "options", "type": "uint8_t" },
+        { "name": "type", "type": "uint8_t" },
+        { "name": "linkStateId", "type": "uint32_t" },
+        { "name": "advertisingRouter", "type": "uint32_t" },
+        { "name": "sequenceNumber", "type": "int32_t", "description": "Signed 32-bit (Section 12.1.6, RFC 2328)" },
+        { "name": "checksum", "type": "uint16_t" },
+        { "name": "length", "type": "uint16_t" }
+      ]
+    },
+    {
+      "name": "LSARequest",
+      "description": "Link State Request body (RFC A.3.4)",
+      "fields": [
+        { "name": "LSType", "type": "uint32_t" },
+        { "name": "linkStateId", "type": "uint32_t" },
+        { "name": "advertisingRouter", "type": "uint32_t" }
+      ]
+    },
+    {
+      "name": "TOSData",
+      "description": "TOS metric entry",
+      "fields": [
+        { "name": "TOSid", "type": "uint8_t" },
+        { "name": "zero", "type": "uint8_t" },
+        { "name": "metric", "type": "uint16_t" }
+      ]
+    },
+    {
+      "name": "LSALink",
+      "description": "Router-LSA link entry (RFC A.4.2)",
+      "fields": [
+        { "name": "linkID", "type": "uint32_t" },
+        { "name": "linkData", "type": "uint32_t" },
+        { "name": "type", "type": "uint8_t" },
+        { "name": "numTOS", "type": "uint8_t" },
+        { "name": "metric", "type": "uint16_t" },
+        { "name": "Data", "type": "vector<TOSData>", "description": "Danh sách TOS entries" }
+      ]
+    },
+    {
+      "name": "LSA",
+      "description": "Router-LSA (Link State Advertisement)",
+      "fields": [
+        { "name": "header", "type": "LSAHeader" },
+        { "name": "flags", "type": "uint8_t" },
+        { "name": "zero", "type": "uint8_t" },
+        { "name": "numLinks", "type": "uint16_t" },
+        { "name": "links", "type": "vector<LSALink>" }
+      ]
+    },
+    {
+      "name": "InterfaceData",
+      "description": "Cấu trúc dữ liệu giao diện (Section 9, trang 63–66)",
+      "fields": [
+        { "name": "type", "type": "unsigned int", "description": "Loại giao diện (P2P, broadcast, NBMA...)" },
+        { "name": "state", "type": "unsigned int", "description": "Trạng thái máy trạng thái interface" },
+        { "name": "ipAddress", "type": "uint32_t", "description": "Địa chỉ IP nguồn" },
+        { "name": "mask", "type": "uint32_t", "description": "Subnet mask. P2P unnumbered -> không định nghĩa" },
+        { "name": "areaID", "type": "uint32_t", "description": "Area ID của vùng" },
+        { "name": "helloInterval", "type": "uint16_t", "description": "Chu kỳ gửi Hello (giây)" },
+        { "name": "routerDeadInterval", "type": "uint32_t", "description": "Thời gian chờ neighbor timeout (giây)" },
+        { "name": "infTransDelay", "type": "unsigned int", "description": "Trễ truyền ước tính (giây)" },
+        { "name": "routerPriority", "type": "uint8_t", "description": "Độ ưu tiên bầu DR (0-255). P2P luôn 0" },
+        { "name": "cost", "type": "uint16_t", "description": "Chi phí gửi gói dữ liệu qua interface" },
+        { "name": "rxmtInterval", "type": "unsigned int", "description": "Chu kỳ retransmit LSA (giây)" },
+        { "name": "neighbor", "type": "NeighborData*", "description": "Neighbor P2P duy nhất" }
+      ]
+    },
+    {
+      "name": "NeighborData",
+      "description": "Cấu trúc dữ liệu neighbor (Section 10)",
+      "fields": [
+        { "name": "state", "type": "unsigned int", "description": "Trạng thái neighbor (OspfNeighborState)" },
+        { "name": "isMaster", "type": "unsigned int", "description": "Vai trò master/slave trong DD exchange" },
+        { "name": "ddSequenceNumber", "type": "uint32_t", "description": "Số thứ tự DD đang trao đổi" },
+        { "name": "lastDdOptions", "type": "uint8_t", "description": "Options từ DD packet cuối" },
+        { "name": "lastDdIMs", "type": "uint8_t", "description": "I+M+MS bits từ DD packet cuối" },
+        { "name": "IDNeighbor", "type": "uint32_t", "description": "Router ID của neighbor" },
+        { "name": "priorityNeighbor", "type": "uint8_t", "description": "Router Priority của neighbor" },
+        { "name": "IPNeighbor", "type": "uint32_t", "description": "Router IP của neighbor" },
+        { "name": "optionsNeighbor", "type": "uint8_t", "description": "Options từ Hello packet cuối" },
+        { "name": "databaseSummaryList", "type": "vector<LSAHeader>", "description": "LSA đã flood nhưng chưa ACK" },
+        { "name": "linkStateRequestList", "type": "vector<LSAHeader>", "description": "LSAHeader của LSDB lúc vào Exchange" },
+        { "name": "linkStateRetransmissionList", "type": "vector<LSARequest>", "description": "LSA còn thiếu, gửi qua LS Request" },
+        { "name": "rxmtTimer", "type": "cMessage*", "description": "Timer retransmit DD/LS Request" },
+        { "name": "inactivityTimer", "type": "cMessage*", "description": "Timer theo dõi thời gian sống" }
+      ]
+    },
+    {
+      "name": "SpfVertex",
+      "description": "Đỉnh trong cây SPF (kết quả Dijkstra)",
+      "fields": [
+        { "name": "vertexId", "type": "uint32_t", "description": "Router ID" },
+        { "name": "neighbors", "type": "vector<SpfVertex*>", "description": "Danh sách kề: con trỏ tới đỉnh con" },
+        { "name": "parent", "type": "SpfVertex*", "description": "Con trỏ tới đỉnh cha (nullptr nếu là gốc)" },
+        { "name": "nextHop", "type": "unsigned int", "description": "Index vào state->interfaces[]" },
+        { "name": "distance", "type": "uint16_t", "description": "Tổng chi phí từ gốc đến đỉnh này" }
+      ]
+    },
+    {
+      "name": "AreaData",
+      "description": "Cấu trúc dữ liệu vùng (Section 6, trang 49–51)",
+      "fields": [
+        { "name": "areaID", "type": "uint32_t", "description": "Định danh vùng (32-bit), backbone = 0.0.0.0" },
+        { "name": "interfaceIndices", "type": "vector<unsigned int>", "description": "Index vào state->interfaces[]" },
+        { "name": "routerLSAs", "type": "vector<LSA>", "description": "LSDB: Router-LSA từ mỗi router trong vùng" },
+        { "name": "spfVertices", "type": "vector<SpfVertex>", "description": "Danh sách đỉnh kết quả SPF" },
+        { "name": "transitCapability", "type": "bool" },
+        { "name": "externalRoutingCapability", "type": "bool", "description": "TRUE = cho AS-external-LSA; FALSE = stub" },
+        { "name": "stubDefaultCost", "type": "uint32_t" }
+      ]
+    },
+    {
+      "name": "RoutingTableEntry",
+      "description": "Bảng định tuyến (Section 11)",
+      "fields": [
+        { "name": "destinationType", "type": "uint8_t", "description": "N=network hoặc R=router" },
+        { "name": "destinationId", "type": "uint32_t", "description": "Địa chỉ IP đích hoặc Router ID" },
+        { "name": "addressMask", "type": "uint32_t", "description": "Subnet mask; host route = 0xffffffff" },
+        { "name": "area", "type": "uint32_t", "description": "Vùng liên kết của entry" },
+        { "name": "pathType", "type": "uint8_t", "description": "intra(1)/inter(2)/type1(3)/type2(4)" },
+        { "name": "cost", "type": "uint32_t", "description": "Tổng chi phí" },
+        { "name": "nextHop", "type": "uint32_t", "description": "Router ID của hop kế tiếp" }
+      ]
+    },
+    {
+      "name": "DdResult",
+      "description": "Kết quả xử lý DD packet",
+      "fields": [
+        { "name": "valid", "type": "bool" },
+        { "name": "negotiationDone", "type": "bool", "description": "NegotiationDone event -> Exchange" },
+        { "name": "exchangeDone", "type": "bool", "description": "ExchangeDone event -> Loading/Full" },
+        { "name": "shouldSendDD", "type": "bool", "description": "Slave cần reply DD ngay" },
+        { "name": "neighborStateChanged", "type": "bool" }
+      ]
+    },
+    {
+      "name": "LsrResult",
+      "description": "Kết quả xử lý LS Request packet",
+      "fields": [
+        { "name": "valid", "type": "bool" },
+        { "name": "badLSReq", "type": "bool" },
+        { "name": "lsus", "type": "vector<LSA>", "description": "LSAs cần gửi về trong LSU" }
+      ]
+    },
+    {
+      "name": "LsuResult",
+      "description": "Kết quả xử lý LSU packet",
+      "fields": [
+        { "name": "valid", "type": "bool" },
+        { "name": "loadingDone", "type": "bool" },
+        { "name": "scheduleSPF", "type": "bool" },
+        { "name": "badLSReq", "type": "bool" },
+        { "name": "ackHeaders", "type": "vector<LSAHeader>", "description": "LSA headers cần ACK" },
+        { "name": "newLsas", "type": "vector<LSAHeader>", "description": "LSA headers mới cài vào LSDB" }
+      ]
+    }
+  ],
+  "classes": [
+    {
+      "name": "OspfRouterState",
+      "description": "Trạng thái tổng thể của router OSPF",
+      "fields": [
+        { "name": "routerID", "type": "uint32_t" },
+        { "name": "interfaces", "type": "vector<InterfaceData>" },
+        { "name": "area", "type": "AreaData" },
+        { "name": "RoutingTable", "type": "vector<RoutingTableEntry>" },
+        { "name": "externalRoutes", "type": "map<uint32_t, uint32_t>", "description": "Route AS-external" }
+      ],
+      "methods": [
+        "OspfRouterState(uint32_t routerId, int numInterfaces) - constructor",
+        "~OspfRouterState() - destructor",
+        "originateRouterLSA() - tạo Router-LSA mới (Section 12.4.1)"
+      ]
+    },
+    {
+      "name": "helloData",
+      "description": "Xử lý Hello packet (RFC 2328 Section 10.5)",
+      "fields": [
+        { "name": "networkMask", "type": "uint32_t" },
+        { "name": "helloInterval", "type": "uint16_t" },
+        { "name": "options", "type": "uint8_t" },
+        { "name": "routerPriority", "type": "uint8_t" },
+        { "name": "routerDeadInterval", "type": "uint32_t" },
+        { "name": "designatedRouter", "type": "uint32_t" },
+        { "name": "backupDesignatedRouter", "type": "uint32_t" },
+        { "name": "neighborId", "type": "vector<uint32_t>" }
+      ],
+      "staticMethods": [
+        "sendHello(int ifIndex, OspfRouterState& state, uint32_t routerId, cSimpleModule* mod)",
+        "processHello(...) -> bool"
+      ]
+    },
+    {
+      "name": "databaseDescriptionData",
+      "description": "Xử lý DD packet (Section 10.6)",
+      "fields": [
+        { "name": "interfaceMTU", "type": "uint16_t" },
+        { "name": "options", "type": "uint8_t" },
+        { "name": "flags", "type": "uint8_t" },
+        { "name": "ddSequenceNumber", "type": "uint32_t" },
+        { "name": "lsaHeaders", "type": "vector<LSAHeader>" }
+      ],
+      "staticMethods": [
+        "sendDD(...)",
+        "processDD(...) -> DdResult"
+      ]
+    },
+    {
+      "name": "linkStateRequestData",
+      "description": "Xử lý LS Request packet (Section 10.7)",
+      "fields": [
+        { "name": "requests", "type": "vector<LSARequest>" }
+      ],
+      "staticMethods": [
+        "sendLSR(...)",
+        "processLSR(...) -> LsrResult"
+      ]
+    },
+    {
+      "name": "linkStateUpdateData",
+      "description": "Xử lý LSU packet (Section 13)",
+      "fields": [
+        { "name": "numberOfLSA", "type": "uint32_t" },
+        { "name": "LSAs", "type": "vector<LSA>" }
+      ],
+      "staticMethods": [
+        "sendLSU(...)",
+        "processLSU(...) -> LsuResult",
+        "floodLSA(...) - Section 13.3"
+      ]
+    },
+    {
+      "name": "linkStateAcknowledgementData",
+      "description": "Xử lý LSAck packet (Section 13.5)",
+      "fields": [
+        { "name": "data", "type": "vector<LSAHeader>" }
+      ],
+      "staticMethods": [
+        "sendLSAck(...)"
+      ]
+    },
+    {
+      "name": "OspfMess",
+      "description": "OSPF message (extends cMessage)",
+      "baseClass": "cMessage",
+      "fields": [
+        { "name": "version", "type": "uint8_t" },
+        { "name": "type", "type": "uint8_t" },
+        { "name": "length", "type": "uint16_t" },
+        { "name": "routerId", "type": "uint32_t" },
+        { "name": "areaId", "type": "uint32_t" },
+        { "name": "checksum", "type": "uint16_t" },
+        { "name": "authType", "type": "uint16_t" },
+        { "name": "authData1", "type": "uint32_t" },
+        { "name": "authData2", "type": "uint32_t" },
+        { "name": "payload", "type": "vector<uint8_t>" }
+      ],
+      "staticMethods": [
+        "send(type, body, routerId, areaId, ifIndex, mod) - đóng gói và gửi",
+        "parse(msg, iface, hdr, data) -> type - giải nén"
+      ]
+    },
+    {
+      "name": "Mess",
+      "description": "Message từ .msg (extends cMessage), khung chứa dữ liệu thô",
+      "baseClass": "cMessage",
+      "fields": [
+        { "name": "payload", "type": "uint8_t[]", "description": "Dữ liệu gói tin OSPF" }
+      ]
+    }
+  ],
+  "networkDefinition": {
+    "name": "Ospf",
+    "topology": "10-router mesh (hỗn hợp ring + cross + star)",
+    "submodules": {
+      "routers": [
+        { "name": "r1", "type": "routerOspf" },
+        { "name": "r2", "type": "routerOspf" },
+        { "name": "r3", "type": "routerOspf" },
+        { "name": "r4", "type": "routerOspf" },
+        { "name": "r5", "type": "routerOspf" },
+        { "name": "r6", "type": "routerOspf" },
+        { "name": "r7", "type": "routerOspf" },
+        { "name": "r8", "type": "routerOspf" },
+        { "name": "r9", "type": "routerOspf" },
+        { "name": "r10", "type": "routerOspf" }
+      ],
+      "clients": [
+        { "name": "c1" }, { "name": "c2" }, { "name": "c3" }, { "name": "c4" }, { "name": "c5" },
+        { "name": "c6" }, { "name": "c7" }, { "name": "c8" }, { "name": "c9" }, { "name": "c10" }
+      ]
+    }
+  }
+}

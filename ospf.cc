@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 Define_Module(routerOspf);
 
@@ -16,6 +20,7 @@ void routerOspf::initialize()
         std::string name = getName();
         routerId = std::stoi(name.substr(1));
     }
+    numRouters = par("numRouters");
     int n = gateSize("gate");
     state = new OspfRouterState(routerId, n);
 
@@ -36,17 +41,20 @@ void routerOspf::initialize()
     scheduleAt(simTime() + state->interfaces[0].helloInterval, helloTimer);
 
     spfTimer = nullptr;                     // SPF timer chưa dùng
-    msgSeq = 0;                             // message dump counter
 
-    // Ghi state dump đầu tiên — trạng thái ngay sau Phase 0 (0.G)
-    state->printState("init");
+    // Initialize link flap scheduler
+    flapTotal = 0;
+    flapRemaining = 0;
+    flapTimer = nullptr;
+    blockedInterfaces.clear();
+    parseLinkFlaps("link_flaps.txt");
 }
 
 
 void routerOspf::handleMessage(cMessage *msg)
 {
-    // Biến tạm để dump message ở cuối hàm (sau khi xử lý xong)
-    std::vector<uint8_t> dumpBytes;
+    // Debug: dump state mỗi lần handleMessage được gọi
+    dumpStateToJson("log");
 
     // xử lý timer
     if (msg->isSelfMessage()) {
@@ -87,10 +95,35 @@ void routerOspf::handleMessage(cMessage *msg)
                 }
             }
 
-            state->logTransition("2a", "SPF completed", simTime().dbl(), -1);
-
         spfTimer = nullptr;
         delete msg;
+        } else if (msg == flapTimer) {
+            // Xử lý link flap event
+            int evIdx = flapTotal - flapRemaining;
+            LinkFlapEvent& ev = flapEvents[evIdx];
+            // Lookup interface từ targetRouterId
+            int ifIdx = findInterfaceByNeighbor(ev.targetRouterId);
+            if (ifIdx >= 0) {
+                if (ev.isDown) {
+                    blockedInterfaces.insert(ifIdx);
+                    state->interfaces[ifIdx].linkDisabled = true;
+                } else {
+                    blockedInterfaces.erase(ifIdx);
+                    state->interfaces[ifIdx].linkDisabled = false;
+                }
+            } else {
+            }
+
+            flapRemaining--;
+
+            // Schedule event kế tiếp
+            if (flapRemaining > 0) {
+                int nextIdx = flapTotal - flapRemaining;
+                scheduleAt(flapEvents[nextIdx].time, msg);
+            } else {
+                flapTimer = nullptr;
+                delete msg;
+            }
         } else {
             // Tìm timer nào đã cháy: inactivityTimer hoặc rxmtTimer
             bool found = false;
@@ -100,12 +133,23 @@ void routerOspf::handleMessage(cMessage *msg)
                 if (nbr && nbr->inactivityTimer == msg) {
                     nbr->inactivityTimer = nullptr;
                     nbr->state = NBR_DOWN;
-                    nbr->IDNeighbor = 0;
+                    // Khong clear IDNeighbor: giu lai de findInterfaceByNeighbor()
+                    // van tim duoc interface khi flap UP sau nay
                     nbr->databaseSummaryList.clear();
                     nbr->linkStateRequestList.clear();
                     nbr->linkStateRetransmissionList.clear();
-                    state->logTransition("1a", "InactivityTimer",
-                                         simTime().dbl(), i);
+                    // InactivityTimer cháy: originate LSA mới + schedule SPF
+                    state->originateRouterLSA();
+                    for (auto& lsa : state->area.routerLSAs) {
+                        if (lsa.header.advertisingRouter == routerId) {
+                            linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
+                            break;
+                        }
+                    }
+                    if (!spfTimer) {
+                        spfTimer = new cMessage("spfTimer");
+                        scheduleAt(simTime() + iface->infTransDelay, spfTimer);
+                    }
                     found = true;
                     break;
                 }
@@ -176,17 +220,23 @@ void routerOspf::handleMessage(cMessage *msg)
         return;
     }
 
+    // === LINK FLAP BLOCK CHECK ===
+    if (!msg->isSelfMessage() && !blockedInterfaces.empty()
+        && !msg->arrivedOn("clientGate$i")) {
+        int ifIndex = msg->getArrivalGate()->getIndex();
+        if (blockedInterfaces.count(ifIndex)) {
+            delete msg;
+            return;
+        }
+    }
+
     //code chính xử lý gói tin
 
     // Data packet từ Client module (clientGate)
     if (msg->arrivedOn("clientGate$i")) {
         Mess* dataMsg = dynamic_cast<Mess*>(msg);
         if (dataMsg) {
-            int n = dataMsg->getPayloadArraySize();
-            dumpBytes.resize(n);
-            for (int i = 0; i < n; i++) dumpBytes[i] = dataMsg->getPayload(i);
             forwardData(dataMsg, -2);  // -2 = from client
-            if (!dumpBytes.empty()) dumpMessage(dumpBytes.data(), dumpBytes.size());
         } else
             delete msg;
         return;
@@ -198,38 +248,6 @@ void routerOspf::handleMessage(cMessage *msg)
     headerOspf hdr;
     std::vector<uint8_t> data;
     uint8_t pktType = OspfMess::parse((Mess*)msg, iface, hdr, data);
-
-    // Dump raw message binary (OSPF header 24B + body)
-    {
-        uint16_t totalLen = 24 + (uint16_t)data.size();
-        std::vector<uint8_t> raw(24 + data.size());
-        raw[0] = hdr.version;
-        raw[1] = pktType;
-        raw[2] = (totalLen >> 8) & 0xFF;
-        raw[3] = totalLen & 0xFF;
-        raw[4] = (hdr.routerId >> 24) & 0xFF;
-        raw[5] = (hdr.routerId >> 16) & 0xFF;
-        raw[6] = (hdr.routerId >> 8) & 0xFF;
-        raw[7] = hdr.routerId & 0xFF;
-        raw[8] = (hdr.areaId >> 24) & 0xFF;
-        raw[9] = (hdr.areaId >> 16) & 0xFF;
-        raw[10] = (hdr.areaId >> 8) & 0xFF;
-        raw[11] = hdr.areaId & 0xFF;
-        raw[12] = (hdr.checksum >> 8) & 0xFF;
-        raw[13] = hdr.checksum & 0xFF;
-        raw[14] = (hdr.authType >> 8) & 0xFF;
-        raw[15] = hdr.authType & 0xFF;
-        raw[16] = (hdr.authData1 >> 24) & 0xFF;
-        raw[17] = (hdr.authData1 >> 16) & 0xFF;
-        raw[18] = (hdr.authData1 >> 8) & 0xFF;
-        raw[19] = hdr.authData1 & 0xFF;
-        raw[20] = (hdr.authData2 >> 24) & 0xFF;
-        raw[21] = (hdr.authData2 >> 16) & 0xFF;
-        raw[22] = (hdr.authData2 >> 8) & 0xFF;
-        raw[23] = hdr.authData2 & 0xFF;
-        std::memcpy(raw.data() + 24, data.data(), data.size());
-        dumpBytes = std::move(raw);
-    }
 
     if (pktType == 1) {
         NeighborData* nbr = iface->neighbor;
@@ -254,8 +272,6 @@ void routerOspf::handleMessage(cMessage *msg)
                     event = "→2Way (2WayReceived)";
                 else if (oldState >= NBR_TWOWAY && nbr->state == NBR_INIT)
                     event = "→Init (1WayReceived)";
-                if (event)
-                    state->logTransition("1a", event, simTime().dbl(), ifIndex);
             }
 
             // P2P: 2Way → ExStart ngay lập tức (Section 10.4 + 10.3)
@@ -271,8 +287,6 @@ void routerOspf::handleMessage(cMessage *msg)
                 if (!nbr->rxmtTimer)
                     nbr->rxmtTimer = new cMessage("rxmtTimer");
                 scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
-                state->logTransition("1b1", "2Way→ExStart",
-                                     simTime().dbl(), ifIndex);
             }
         }
     }
@@ -306,8 +320,6 @@ void routerOspf::handleMessage(cMessage *msg)
                 databaseDescriptionData::sendDD(ifIndex, *state, routerId, this);
                 nbr->rxmtTimer = new cMessage("rxmtTimer");
                 scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
-                state->logTransition("1b1", "SeqNumberMismatch→ExStart",
-                                     simTime().dbl(), ifIndex);
             }
             delete msg;
             return;
@@ -331,8 +343,6 @@ void routerOspf::handleMessage(cMessage *msg)
             // Schedule rxmtTimer mới
             nbr->rxmtTimer = new cMessage("rxmtTimer");
             scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
-            state->logTransition("1b1", "ExStart→Exchange (NegotiationDone)",
-                                 simTime().dbl(), ifIndex);
         }
 
         // --- ExchangeDone → Loading hoặc Full (Section 10.3) ---
@@ -349,14 +359,9 @@ void routerOspf::handleMessage(cMessage *msg)
                 delete nbr->rxmtTimer;
                 nbr->rxmtTimer = nullptr;
             }
-            state->logTransition("1b1",
-                nbr->state == NBR_FULL ? "ExchangeDone→Full" : "ExchangeDone→Loading",
-                simTime().dbl(), ifIndex);
             // 1c: ExchangeDone→Full → originate Router-LSA (Section 12.4 Event 4)
             if (wasFull) {
                 state->originateRouterLSA();
-                state->logTransition("1c", "Originate+Flood (1st Full)",
-                                     simTime().dbl(), ifIndex);
                 for (auto& lsa : state->area.routerLSAs) {
                     if (lsa.header.advertisingRouter == routerId) {
                         linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
@@ -411,7 +416,6 @@ void routerOspf::handleMessage(cMessage *msg)
                 databaseDescriptionData::sendDD(ifIndex, *state, routerId, this);
                 nbr->rxmtTimer = new cMessage("rxmtTimer");
                 scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
-                state->logTransition("1b2", "BadLSReq→ExStart", simTime().dbl(), ifIndex);
             }
         } else if (lsrRes.valid && !lsrRes.lsus.empty()) {
             // Gửi LSU response (Section 10.7)
@@ -453,8 +457,6 @@ void routerOspf::handleMessage(cMessage *msg)
                 databaseDescriptionData::sendDD(ifIndex, *state, routerId, this);
                 nbr->rxmtTimer = new cMessage("rxmtTimer");
                 scheduleAt(simTime() + iface->rxmtInterval, nbr->rxmtTimer);
-                state->logTransition("1b2", "BadLSReq(LSU)→ExStart",
-                                     simTime().dbl(), ifIndex);
             }
         }
 
@@ -471,12 +473,9 @@ void routerOspf::handleMessage(cMessage *msg)
                 cancelEvent(nbr->rxmtTimer);
                 delete nbr->rxmtTimer; nbr->rxmtTimer = nullptr;
             }
-            state->logTransition("1b2", "LoadingDone→Full", simTime().dbl(), ifIndex);
 
             // 1c: Neighbor đầu tiên Full → originate Router-LSA (Section 12.4 Event 4)
             state->originateRouterLSA();
-            state->logTransition("1c", "Originate+Flood (1st Full)",
-                                 simTime().dbl(), ifIndex);
             // Flood LSA mới ra tất cả neighbor
             for (auto& lsa : state->area.routerLSAs) {
                 if (lsa.header.advertisingRouter == routerId) {
@@ -499,8 +498,6 @@ void routerOspf::handleMessage(cMessage *msg)
 
         // 1c: Flood LSA mới ra neighbor khác (Section 13.3 step (5b))
         if (!lsuRes.newLsas.empty()) {
-            state->logTransition("1c", "FloodFwd",
-                                 simTime().dbl(), ifIndex);
             for (const auto& lsaHdr : lsuRes.newLsas) {
                 // Tra LSDB để lấy LSA đầy đủ
                 for (auto& lsa : state->area.routerLSAs) {
@@ -520,7 +517,6 @@ void routerOspf::handleMessage(cMessage *msg)
             if (!spfTimer) {
                 spfTimer = new cMessage("spfTimer");
                 scheduleAt(simTime() + iface->infTransDelay, spfTimer);
-                state->logTransition("1c", "ScheduleSPF", simTime().dbl(), ifIndex);
             }
         }
     }
@@ -589,41 +585,25 @@ void routerOspf::handleMessage(cMessage *msg)
     else if (pktType == 0) {
         Mess* dataMsg = dynamic_cast<Mess*>(msg);
         if (dataMsg) {
-            int n = dataMsg->getPayloadArraySize();
-            dumpBytes.resize(n);
-            for (int i = 0; i < n; i++) dumpBytes[i] = dataMsg->getPayload(i);
             forwardData(dataMsg, ifIndex);
-            if (!dumpBytes.empty()) dumpMessage(dumpBytes.data(), dumpBytes.size());
         }
         else
             delete msg;
         return; // forwardData handles send/delete; don't fall to delete msg
     }
 
-    if (!dumpBytes.empty()) dumpMessage(dumpBytes.data(), dumpBytes.size());
     delete msg;
-    
-}
 
-void routerOspf::dumpMessage(const uint8_t* bytes, size_t len)
-{
-    namespace fs = std::filesystem;
-
-    msgSeq++;
-    std::string dir = "mess/" + state->lastStateSubdir;
-    fs::create_directories(dir);
-
-    std::string path = dir + "/" + state->lastStateName
-                     + "__a" + std::to_string(msgSeq) + ".bin";
-    std::ofstream f(path, std::ios::binary);
-    if (f.is_open()) {
-        f.write((const char*)bytes, len);
-        f.close();
-    }
 }
 
 void routerOspf::finish()
 {
+    // Cleanup flapTimer
+    if (flapTimer) {
+        cancelAndDelete(flapTimer);
+        flapTimer = nullptr;
+    }
+
     cancelAndDelete(helloTimer);
     if (spfTimer) {
         cancelAndDelete(spfTimer);
@@ -636,10 +616,72 @@ void routerOspf::finish()
             if (nbr->rxmtTimer) cancelAndDelete(nbr->rxmtTimer);
         }
     }
-    state->printState("finish");
     delete state;
 }
 
+
+// === Link Flap Scheduler ===
+
+void routerOspf::parseLinkFlaps(const char* filename)
+{
+    std::ifstream f(filename);
+    if (!f.is_open()) return;  // file không tồn tại -> bỏ qua
+
+    std::string myName = getName();  // "r1", "r2", ...
+    int myId = std::stoi(myName.substr(1));
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream iss(line);
+        std::string rA, rB, action;
+        double t;
+        if (!(iss >> rA >> rB >> action >> t)) continue;
+
+        // Lọc: có liên quan đến router này không?
+        int targetId = -1;
+        if (rA == myName)       targetId = std::stoi(rB.substr(1));
+        else if (rB == myName)  targetId = std::stoi(rA.substr(1));
+        else continue;  // không liên quan
+
+        bool isDown;
+        if (action == "down")       isDown = true;
+        else if (action == "up")    isDown = false;
+        else continue;  // action không hợp lệ
+
+        LinkFlapEvent ev;
+        ev.time = simTime() + t;
+        ev.targetRouterId = targetId;
+        ev.isDown = isDown;
+        flapEvents.push_back(ev);
+    }
+
+    // Sort theo time
+    std::sort(flapEvents.begin(), flapEvents.end(),
+        [](const LinkFlapEvent& a, const LinkFlapEvent& b) {
+            return a.time < b.time;
+        });
+
+    flapTotal = (int)flapEvents.size();
+    flapRemaining = flapTotal;
+
+    // Schedule event đầu tiên
+    if (flapRemaining > 0) {
+        flapTimer = new cMessage("flapTimer");
+        scheduleAt(flapEvents[0].time, flapTimer);
+    }
+}
+
+int routerOspf::findInterfaceByNeighbor(uint32_t targetId)
+{
+    for (int i = 0; i < (int)state->interfaces.size(); i++) {
+        NeighborData* nbr = state->interfaces[i].neighbor;
+        if (nbr && nbr->IDNeighbor == targetId)
+            return i;
+    }
+    return -1;  // không tìm thấy -> link không tồn tại
+}
 
 
 // MaximumAge (RFC 2328 Section 13.2): LSA hết hạn
@@ -683,21 +725,12 @@ void routerOspf::forwardData(Mess* msg, int ifIndex)
                    | ((uint32_t)msg->getPayload(6) << 8)
                    |  msg->getPayload(7);
 
-    // Log test initiation (from Client, was initForwardingTest)
-    if (ifIndex == -2) {
-        state->logTransition("2b", ("Test:" + std::to_string(srcId)
-            + "->" + std::to_string(dest)).c_str(), simTime().dbl(), -1);
-    }
-
     // A: Arrived at destination?
     if (dest == routerId) {
         uint32_t cost = 0;
         for (auto& e : state->RoutingTable)
             if (e.destinationType == 'R' && e.destinationId == srcId)
                 { cost = e.cost; break; }
-        state->logTransition("2b", ("Rcvd:" + std::to_string(srcId)
-            + "->self cost=" + std::to_string(cost)).c_str(),
-            simTime().dbl(), ifIndex);
         // Forward to local Client module
         send(msg, "clientGate$o");
         return;
@@ -714,8 +747,6 @@ void routerOspf::forwardData(Mess* msg, int ifIndex)
         }
     }
     if (!found || nextHopId == 0) {
-        state->logTransition("2b", ("NoRoute:" + std::to_string(dest)).c_str(),
-                             simTime().dbl(), ifIndex);
         delete msg;
         return;
     }
@@ -730,17 +761,11 @@ void routerOspf::forwardData(Mess* msg, int ifIndex)
         }
     }
     if (gate == UINT_MAX) {
-        state->logTransition("2b", ("NHNotConn:" + std::to_string(nextHopId)).c_str(),
-                             simTime().dbl(), ifIndex);
         delete msg;
         return;
     }
 
     // D: Forward to next hop
-    state->logTransition("2b", ("Fwd:" + std::to_string(srcId) + "->"
-        + std::to_string(dest) + " g[" + std::to_string(gate) + "]->"
-        + std::to_string(nextHopId)).c_str(),
-        simTime().dbl(), (int)gate);
     send(msg, "gate$o", gate);
     // After send: OMNeT++ owns msg — do NOT delete
 }
@@ -968,4 +993,388 @@ void routerOspf::calculateSpf()
         [](const RoutingTableEntry& a, const RoutingTableEntry& b) {
             return a.destinationId < b.destinationId;
         });
+}
+
+//////////////////////////////////////////////////////////////////
+// Debug: dump toàn bộ trạng thái router ra file JSON
+//////////////////////////////////////////////////////////////////
+
+// ── enum → tên ──────────────────────────────────────────────────
+static const char* nbrStateName(unsigned int s) {
+    switch (s) {
+        case NBR_DOWN:     return "NBR_DOWN";
+        case NBR_ATTEMPT:  return "NBR_ATTEMPT";
+        case NBR_INIT:     return "NBR_INIT";
+        case NBR_TWOWAY:   return "NBR_TWOWAY";
+        case NBR_EXSTART:  return "NBR_EXSTART";
+        case NBR_EXCHANGE: return "NBR_EXCHANGE";
+        case NBR_LOADING:  return "NBR_LOADING";
+        case NBR_FULL:     return "NBR_FULL";
+        default:           return "UNKNOWN";
+    }
+}
+
+static const char* ifStateName(unsigned int s) {
+    switch (s) {
+        case IF_DOWN:         return "IF_DOWN";
+        case IF_LOOPBACK:     return "IF_LOOPBACK";
+        case IF_WAITING:      return "IF_WAITING";
+        case IF_POINTTOPOINT: return "IF_POINTTOPOINT";
+        case IF_DROTHER:      return "IF_DROTHER";
+        case IF_BACKUP:       return "IF_BACKUP";
+        case IF_DR:           return "IF_DR";
+        default:              return "UNKNOWN";
+    }
+}
+
+static const char* pathTypeName(unsigned int p) {
+    switch (p) {
+        case PATH_INTRA_AREA: return "PATH_INTRA_AREA";
+        case PATH_INTER_AREA: return "PATH_INTER_AREA";
+        case PATH_TYPE1_EXT:  return "PATH_TYPE1_EXT";
+        case PATH_TYPE2_EXT:  return "PATH_TYPE2_EXT";
+        default:              return "UNKNOWN";
+    }
+}
+
+static const char* linkTypeName(unsigned int t) {
+    switch (t) {
+        case LINK_P2P:     return "LINK_P2P";
+        case LINK_TRANSIT: return "LINK_TRANSIT";
+        case LINK_STUB:    return "LINK_STUB";
+        case LINK_VIRTUAL: return "LINK_VIRTUAL";
+        default:           return "UNKNOWN";
+    }
+}
+
+// ── IP helper ────────────────────────────────────────────────────
+static std::string ipToStr(uint32_t ip) {
+    std::ostringstream oss;
+    oss << ((ip >> 24) & 0xFF) << "."
+        << ((ip >> 16) & 0xFF) << "."
+        << ((ip >> 8)  & 0xFF) << "."
+        << (ip & 0xFF);
+    return oss.str();
+}
+
+// ── serialize helpers (file-scope, forward-declared where needed) ──
+
+static void writeJson(std::ofstream& f, const LSAHeader& h, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"age\": " << h.age << ",\n";
+    f << indent << "  \"options\": " << (int)h.options << ",\n";
+    f << indent << "  \"type\": " << (int)h.type << ",\n";
+    f << indent << "  \"linkStateId\": \"" << ipToStr(h.linkStateId) << "\",\n";
+    f << indent << "  \"advertisingRouter\": \"" << ipToStr(h.advertisingRouter) << "\",\n";
+    f << indent << "  \"sequenceNumber\": " << h.sequenceNumber << ",\n";
+    f << indent << "  \"checksum\": " << h.checksum << ",\n";
+    f << indent << "  \"length\": " << h.length << "\n";
+    f << indent << "}";
+}
+
+static void writeJson(std::ofstream& f, const TOSData& t, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"TOSid\": " << (int)t.TOSid << ",\n";
+    f << indent << "  \"zero\": " << (int)t.zero << ",\n";
+    f << indent << "  \"metric\": " << t.metric << "\n";
+    f << indent << "}";
+}
+
+static void writeJson(std::ofstream& f, const LSALink& l, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"linkID\": \"" << ipToStr(l.linkID) << "\",\n";
+    f << indent << "  \"linkData\": \"" << ipToStr(l.linkData) << "\",\n";
+    f << indent << "  \"type\": \"" << linkTypeName(l.type) << "\",\n";
+    f << indent << "  \"numTOS\": " << (int)l.numTOS << ",\n";
+    f << indent << "  \"metric\": " << l.metric << ",\n";
+    f << indent << "  \"TOSData\": [\n";
+    for (size_t i = 0; i < l.Data.size(); i++) {
+        writeJson(f, l.Data[i], indent + "    ");
+        if (i + 1 < l.Data.size()) f << ",";
+        f << "\n";
+    }
+    f << indent << "  ]\n";
+    f << indent << "}";
+}
+
+static void writeJson(std::ofstream& f, const LSA& lsa, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"header\": ";
+    writeJson(f, lsa.header, indent + "  ");
+    f << ",\n";
+    f << indent << "  \"flags\": " << (int)lsa.flags << ",\n";
+    f << indent << "  \"zero\": " << (int)lsa.zero << ",\n";
+    f << indent << "  \"numLinks\": " << lsa.numLinks << ",\n";
+    f << indent << "  \"links\": [\n";
+    for (size_t i = 0; i < lsa.links.size(); i++) {
+        writeJson(f, lsa.links[i], indent + "    ");
+        if (i + 1 < lsa.links.size()) f << ",";
+        f << "\n";
+    }
+    f << indent << "  ]\n";
+    f << indent << "}";
+}
+
+static void writeJson(std::ofstream& f, const LSARequest& r, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"LSType\": " << r.LSType << ",\n";
+    f << indent << "  \"linkStateId\": \"" << ipToStr(r.linkStateId) << "\",\n";
+    f << indent << "  \"advertisingRouter\": \"" << ipToStr(r.advertisingRouter) << "\"\n";
+    f << indent << "}";
+}
+
+static void writeJson(std::ofstream& f, const NeighborData& nbr, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"state\": \"" << nbrStateName(nbr.state) << "\",\n";
+    f << indent << "  \"isMaster\": " << nbr.isMaster << ",\n";
+    f << indent << "  \"ddSequenceNumber\": " << nbr.ddSequenceNumber << ",\n";
+    f << indent << "  \"lastDdOptions\": " << (int)nbr.lastDdOptions << ",\n";
+    f << indent << "  \"lastDdIMs\": " << (int)nbr.lastDdIMs << ",\n";
+    f << indent << "  \"IDNeighbor\": \"" << ipToStr(nbr.IDNeighbor) << "\",\n";
+    f << indent << "  \"priorityNeighbor\": " << (int)nbr.priorityNeighbor << ",\n";
+    f << indent << "  \"IPNeighbor\": \"" << ipToStr(nbr.IPNeighbor) << "\",\n";
+    f << indent << "  \"optionsNeighbor\": " << (int)nbr.optionsNeighbor << ",\n";
+
+    f << indent << "  \"databaseSummaryList\": [\n";
+    for (size_t i = 0; i < nbr.databaseSummaryList.size(); i++) {
+        writeJson(f, nbr.databaseSummaryList[i], indent + "    ");
+        if (i + 1 < nbr.databaseSummaryList.size()) f << ",";
+        f << "\n";
+    }
+    f << indent << "  ],\n";
+
+    f << indent << "  \"linkStateRequestList\": [\n";
+    for (size_t i = 0; i < nbr.linkStateRequestList.size(); i++) {
+        writeJson(f, nbr.linkStateRequestList[i], indent + "    ");
+        if (i + 1 < nbr.linkStateRequestList.size()) f << ",";
+        f << "\n";
+    }
+    f << indent << "  ],\n";
+
+    f << indent << "  \"linkStateRetransmissionList\": [\n";
+    for (size_t i = 0; i < nbr.linkStateRetransmissionList.size(); i++) {
+        writeJson(f, nbr.linkStateRetransmissionList[i], indent + "    ");
+        if (i + 1 < nbr.linkStateRetransmissionList.size()) f << ",";
+        f << "\n";
+    }
+    f << indent << "  ],\n";
+
+    // timers
+    f << indent << "  \"rxmtTimer\": " << (nbr.rxmtTimer ? "true" : "null") << ",\n";
+    f << indent << "  \"inactivityTimer\": " << (nbr.inactivityTimer ? "true" : "null") << "\n";
+    f << indent << "}";
+}
+
+// Forward declaration for SPF recursion
+static void writeSpfVertex(std::ofstream& f, const SpfVertex& v, const std::string& indent,
+                           std::set<uint32_t>& visited);
+
+static void writeJson(std::ofstream& f, const InterfaceData& iface, int idx, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"index\": " << idx << ",\n";
+    f << indent << "  \"type\": " << iface.type << ",\n";
+    f << indent << "  \"state\": \"" << ifStateName(iface.state) << "\",\n";
+    f << indent << "  \"linkDisabled\": " << (iface.linkDisabled ? "true" : "false") << ",\n";
+    f << indent << "  \"ipAddress\": \"" << ipToStr(iface.ipAddress) << "\",\n";
+    f << indent << "  \"mask\": \"" << ipToStr(iface.mask) << "\",\n";
+    f << indent << "  \"areaID\": \"" << ipToStr(iface.areaID) << "\",\n";
+    f << indent << "  \"helloInterval\": " << iface.helloInterval << ",\n";
+    f << indent << "  \"routerDeadInterval\": " << iface.routerDeadInterval << ",\n";
+    f << indent << "  \"infTransDelay\": " << iface.infTransDelay << ",\n";
+    f << indent << "  \"routerPriority\": " << (int)iface.routerPriority << ",\n";
+    f << indent << "  \"cost\": " << iface.cost << ",\n";
+    f << indent << "  \"rxmtInterval\": " << iface.rxmtInterval << ",\n";
+    f << indent << "  \"neighbor\": ";
+    if (iface.neighbor) {
+        writeJson(f, *iface.neighbor, indent + "  ");
+    } else {
+        f << "null";
+    }
+    f << "\n" << indent << "}";
+}
+
+static void writeSpfVertex(std::ofstream& f, const SpfVertex& v, const std::string& indent,
+                           std::set<uint32_t>& visited) {
+    f << indent << "{\n";
+    f << indent << "  \"vertexId\": \"" << ipToStr(v.vertexId) << "\",\n";
+    f << indent << "  \"distance\": " << v.distance << ",\n";
+    f << indent << "  \"nextHop\": " << v.nextHop << ",\n";
+    f << indent << "  \"parent\": ";
+    if (v.parent)
+        f << "\"" << ipToStr(v.parent->vertexId) << "\"";
+    else
+        f << "null";
+    f << ",\n";
+
+    visited.insert(v.vertexId);
+    f << indent << "  \"neighbors\": [\n";
+    bool first = true;
+    for (size_t i = 0; i < v.neighbors.size(); i++) {
+        if (v.neighbors[i]) {
+            if (!first) f << ",\n";
+            first = false;
+            if (visited.count(v.neighbors[i]->vertexId)) {
+                f << indent << "    {\"ref\": \"" << ipToStr(v.neighbors[i]->vertexId) << "\"}";
+            } else {
+                writeSpfVertex(f, *v.neighbors[i], indent + "    ", visited);
+            }
+        }
+    }
+    if (!first) f << "\n";
+    f << indent << "  ]\n";
+    f << indent << "}";
+}
+
+static void writeJson(std::ofstream& f, const RoutingTableEntry& e, const std::string& indent) {
+    f << indent << "{\n";
+    f << indent << "  \"destinationType\": \"" << (char)e.destinationType << "\",\n";
+    f << indent << "  \"destinationId\": \"" << ipToStr(e.destinationId) << "\",\n";
+    f << indent << "  \"addressMask\": \"" << ipToStr(e.addressMask) << "\",\n";
+    f << indent << "  \"area\": \"" << ipToStr(e.area) << "\",\n";
+    f << indent << "  \"pathType\": \"" << pathTypeName(e.pathType) << "\",\n";
+    f << indent << "  \"cost\": " << e.cost << ",\n";
+    f << indent << "  \"nextHop\": \"" << ipToStr(e.nextHop) << "\"\n";
+    f << indent << "}";
+}
+
+// ── main dump function ──────────────────────────────────────────
+void routerOspf::dumpStateToJson(const char* dir) {
+    // Tạo thư mục nếu chưa có
+    mkdir(dir, 0755);
+
+    // Tìm số thứ tự file tiếp theo
+    static int counter = 0;
+    counter++;
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/%d.json", dir, counter);
+
+    std::ofstream f(path);
+    if (!f.is_open()) {
+        EV << "dumpStateToJson: cannot open " << path << "\n";
+        return;
+    }
+
+    const std::string I  = "  ";
+    const std::string I2 = "    ";
+    const std::string I3 = "      ";
+    const std::string I4 = "        ";
+
+    f << "{\n";
+
+    // ── routerOspf top-level fields ──
+    f << I << "\"routerId\": \"" << ipToStr(routerId) << "\",\n";
+    f << I << "\"numRouters\": " << numRouters << ",\n";
+    f << I << "\"simTime\": " << simTime().dbl() << ",\n";
+
+    // timers
+    f << I << "\"timers\": {\n";
+    f << I2 << "\"helloTimer\": " << (helloTimer ? std::to_string(helloTimer->getArrivalTime().dbl()) : "null") << ",\n";
+    f << I2 << "\"spfTimer\": " << (spfTimer ? std::to_string(spfTimer->getArrivalTime().dbl()) : "null") << ",\n";
+    f << I2 << "\"flapTimer\": " << (flapTimer ? std::to_string(flapTimer->getArrivalTime().dbl()) : "null") << "\n";
+    f << I << "},\n";
+
+    // link flap
+    f << I << "\"linkFlap\": {\n";
+    f << I2 << "\"total\": " << flapTotal << ",\n";
+    f << I2 << "\"remaining\": " << flapRemaining << ",\n";
+    f << I2 << "\"blockedInterfaces\": [";
+    bool first = true;
+    for (int ifIdx : blockedInterfaces) {
+        if (!first) f << ", ";
+        first = false;
+        f << ifIdx;
+    }
+    f << "],\n";
+    f << I2 << "\"events\": [\n";
+    for (size_t i = 0; i < flapEvents.size(); i++) {
+        f << I3 << "{\"time\": " << flapEvents[i].time.dbl()
+          << ", \"targetRouterId\": " << flapEvents[i].targetRouterId
+          << ", \"isDown\": " << (flapEvents[i].isDown ? "true" : "false") << "}";
+        if (i + 1 < flapEvents.size()) f << ",";
+        f << "\n";
+    }
+    f << I2 << "]\n";
+    f << I << "},\n";
+
+    // ── OspfRouterState ──
+    f << I << "\"state\": {\n";
+    f << I2 << "\"routerID\": \"" << ipToStr(state->routerID) << "\",\n";
+
+    // interfaces
+    f << I2 << "\"interfaces\": [\n";
+    for (size_t i = 0; i < state->interfaces.size(); i++) {
+        writeJson(f, state->interfaces[i], (int)i, I3);
+        if (i + 1 < state->interfaces.size()) f << ",";
+        f << "\n";
+    }
+    f << I2 << "],\n";
+
+    // area
+    const AreaData& a = state->area;
+    f << I2 << "\"area\": {\n";
+    f << I3 << "\"areaID\": \"" << ipToStr(a.areaID) << "\",\n";
+    f << I3 << "\"transitCapability\": " << (a.transitCapability ? "true" : "false") << ",\n";
+    f << I3 << "\"externalRoutingCapability\": " << (a.externalRoutingCapability ? "true" : "false") << ",\n";
+    f << I3 << "\"stubDefaultCost\": " << a.stubDefaultCost << ",\n";
+
+    f << I3 << "\"interfaceIndices\": [";
+    first = true;
+    for (auto idx : a.interfaceIndices) {
+        if (!first) f << ", ";
+        first = false;
+        f << idx;
+    }
+    f << "],\n";
+
+    // LSDB
+    f << I3 << "\"routerLSAs\": [\n";
+    for (size_t i = 0; i < a.routerLSAs.size(); i++) {
+        writeJson(f, a.routerLSAs[i], I4);
+        if (i + 1 < a.routerLSAs.size()) f << ",";
+        f << "\n";
+    }
+    f << I3 << "],\n";
+
+    // SPF tree
+    f << I3 << "\"spfVertices\": [\n";
+    std::set<uint32_t> visited;
+    int verticesWritten = 0;
+    for (size_t i = 0; i < a.spfVertices.size(); i++) {
+        if (visited.count(a.spfVertices[i].vertexId) == 0) {
+            if (verticesWritten > 0) f << ",\n";
+            writeSpfVertex(f, a.spfVertices[i], I4, visited);
+            verticesWritten++;
+        }
+    }
+    if (verticesWritten > 0) f << "\n";
+    f << I3 << "]\n";
+    f << I2 << "},\n";
+
+    // routing table
+    f << I2 << "\"routingTable\": [\n";
+    for (size_t i = 0; i < state->RoutingTable.size(); i++) {
+        writeJson(f, state->RoutingTable[i], I3);
+        if (i + 1 < state->RoutingTable.size()) f << ",";
+        f << "\n";
+    }
+    f << I2 << "],\n";
+
+    // external routes
+    f << I2 << "\"externalRoutes\": {";
+    first = true;
+    for (const auto& kv : state->externalRoutes) {
+        if (!first) f << ",";
+        first = false;
+        f << "\n" << I3 << "\"" << ipToStr(kv.first) << "\": " << kv.second;
+    }
+    if (!state->externalRoutes.empty()) f << "\n" << I2;
+    f << "}\n";
+
+    f << I << "}\n";  // close state
+
+    f << "}\n";  // close root
+    f.close();
+
+    EV << "dumpStateToJson: written " << path << " (" << counter << ")\n";
 }

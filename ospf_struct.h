@@ -5,8 +5,6 @@
 #include <vector>
 #include <map>
 #include <string>
-#include <fstream>
-#include <filesystem>
 #include <omnetpp.h>
 #include "ospf_m.h"
 
@@ -153,6 +151,7 @@ enum OspfRouterLSAFlagBit : uint8_t {
 struct InterfaceData {
     unsigned int type;                               // loại giao diện (P2P, broadcast, NBMA...)
     unsigned int state;                              // trạng thái máy trạng thái interface (Down, P2P, Loopback...)
+    bool linkDisabled;                               // true nếu bị chặn bởi link flap scheduler (Section 9)
     uint32_t ipAddress;                              // địa chỉ IP nguồn trong tất cả gói tin gửi qua interface này
     uint32_t mask;                                   // subnet mask. P2P unnumbered → không định nghĩa (RFC: "not defined")
     uint32_t areaID;                                 // Area ID của vùng chứa mạng kết nối
@@ -428,17 +427,9 @@ class OspfRouterState {
         std::vector<RoutingTableEntry> RoutingTable;
 
         std::map<uint32_t, uint32_t> externalRoutes; // route AS-external
-        std::string lastStateSubdir;  // thư mục con state_dump gần nhất (vd: "1a")
-        std::string lastStateName;    // tên file state_dump gần nhất (vd: "3_r1_0")
 
         OspfRouterState(uint32_t routerId, int numInterfaces);
         ~OspfRouterState();
-
-        void printState(const char* subdir = nullptr);
-
-        // Log state sau transition, ghi vào state_dump/<subphase>/ (gọi từ handleMessage)
-        void logTransition(const char* subphase, const char* event,
-                           double simtime, int ifIndex);
 
         void originateRouterLSA();
 };

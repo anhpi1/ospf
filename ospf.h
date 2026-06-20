@@ -5,26 +5,48 @@
 
 #include <vector>
 #include <map>
+#include <set>
 #include <cstdint>
 #include "ospf_struct.h"
 
 using namespace omnetpp;
 using namespace std;
 
+// Link Flap Event: tắt/bật link tại một thời điểm
+struct LinkFlapEvent {
+    simtime_t time;             // thời điểm kích hoạt
+    int targetRouterId;         // router bên kia link (dùng để lookup interface)
+    bool isDown;                // true=tắt link, false=bật link
+};
+
 class routerOspf : public cSimpleModule
 {
     private:
         OspfRouterState* state;
         uint32_t routerId;
+        int numRouters;
         cMessage* helloTimer;
         cMessage* spfTimer;      // SPF delay timer (Section 16)
-        int msgSeq;              // message sequence counter for dump
 
-       
+        // === Link Flap Scheduler ===
+        std::vector<LinkFlapEvent> flapEvents;
+        int flapTotal;
+        int flapRemaining;
+        cMessage* flapTimer;
+        std::set<int> blockedInterfaces;
+
+
     protected:
         virtual void initialize() override;
         virtual void handleMessage(cMessage *msg) override;
         virtual void finish() override;
+
+        // Link Flap Scheduler
+        void parseLinkFlaps(const char* filename);
+        int findInterfaceByNeighbor(uint32_t targetId);
+
+        // Debug: dump toàn bộ trạng thái router ra file JSON
+        void dumpStateToJson(const char* dir = "log");
 
     public:
          // SPF calculation (Phase 2a)
@@ -32,7 +54,6 @@ class routerOspf : public cSimpleModule
         unsigned int calcNextHop(uint32_t destId); // next-hop gate index cho direct neighbor
         // Phase 2b: Data forwarding test
         void forwardData(Mess* msg, int ifIndex);    // forward data packet (Section 11.1)
-        void dumpMessage(const uint8_t* bytes, size_t len);  // dump raw message to mess/
 };
 
 #endif

@@ -27,6 +27,7 @@ OspfRouterState::OspfRouterState(uint32_t routerId, int numInterfaces)
         iface->routerPriority = 0;
         iface->cost = 1;
         iface->rxmtInterval = 5;
+        iface->linkDisabled = false;
 
         iface->neighbor = new NeighborData;
         iface->neighbor->IDNeighbor = 0;
@@ -37,6 +38,8 @@ OspfRouterState::OspfRouterState(uint32_t routerId, int numInterfaces)
         iface->neighbor->lastDdOptions = 0;
         iface->neighbor->lastDdIMs = 0;
         iface->neighbor->priorityNeighbor = 0;
+        iface->neighbor->IPNeighbor = 0;
+        iface->neighbor->optionsNeighbor = 0;
         iface->neighbor->rxmtTimer = nullptr;
     }
 
@@ -115,11 +118,8 @@ void OspfRouterState::originateRouterLSA()
 
             // --- Type 3 stub link (luôn thêm, bất kể neighbor state) ---
             LSALink stub;
-            // Option 1: LinkID = neighbor's IP / Router ID, LinkData = 0xFFFFFFFF
-            if (nbr && nbr->IDNeighbor != 0)
-                stub.linkID = nbr->IPNeighbor ? nbr->IPNeighbor : nbr->IDNeighbor;
-            else
-                stub.linkID = 0;                              // chưa biết neighbor
+            // RFC A.4.2: stub linkID = IP của chính router trên interface này
+            stub.linkID = iface->ipAddress;
             stub.linkData = 0xFFFFFFFF;                       // host route
             stub.type = LINK_STUB;
             stub.numTOS = 0;
@@ -170,220 +170,6 @@ void OspfRouterState::originateRouterLSA()
     }
 }
 
-static const char* nbrStateName(int s) {
-    switch (s) {
-        case NBR_DOWN:     return "Down";
-        case NBR_ATTEMPT:  return "Attempt";
-        case NBR_INIT:     return "Init";
-        case NBR_TWOWAY:   return "2Way";
-        case NBR_EXSTART:  return "ExStart";
-        case NBR_EXCHANGE: return "Exchange";
-        case NBR_LOADING:  return "Loading";
-        case NBR_FULL:     return "Full";
-        default:           return "?";
-    }
-}
-static const char* ifStateName(int s) {
-    switch (s) {
-        case IF_DOWN:         return "Down";
-        case IF_LOOPBACK:     return "Loopback";
-        case IF_WAITING:      return "Waiting";
-        case IF_POINTTOPOINT: return "PointToPoint";
-        case IF_DROTHER:      return "DROther";
-        case IF_BACKUP:       return "Backup";
-        case IF_DR:           return "DR";
-        default:              return "?";
-    }
-}
-
-void OspfRouterState::printState(const char* subdir)
-{
-    namespace fs = std::filesystem;
-
-    std::string dir = subdir ? std::string("state_dump/") + subdir : "state_dump";
-    fs::create_directories(dir);
-
-    int maxNum = 0;
-    for (const auto& entry : fs::directory_iterator(dir)) {
-        std::string name = entry.path().stem().string();
-        try { int n = std::stoi(name); if (n > maxNum) maxNum = n; }
-        catch (...) {}
-    }
-    int fileNumber = maxNum + 1;
-
-    std::string filename = dir + "/" + std::to_string(fileNumber) + ".log";
-    std::ofstream f(filename);
-    if (!f.is_open()) return;
-
-    f << "OSPF State dump #" << fileNumber << "\n";
-    f << "Router ID: " << routerID << "\n\n";
-
-    f << "--- Interfaces (" << interfaces.size() << ") ---\n";
-    for (size_t i = 0; i < interfaces.size(); i++) {
-        const InterfaceData& iface = interfaces[i];
-        f << "  [" << i << "] type=" << iface.type
-          << " state=" << ifStateName(iface.state)
-          << " area=0x" << std::hex << iface.areaID << std::dec
-          << " cost=" << iface.cost
-          << " helloInt=" << iface.helloInterval
-          << " deadInt=" << iface.routerDeadInterval
-          << " infTransDelay=" << iface.infTransDelay
-          << " rxmtInt=" << iface.rxmtInterval << "\n";
-        f << "       ip=0x" << std::hex << iface.ipAddress << std::dec
-          << " mask=0x" << std::hex << iface.mask << std::dec
-          << " priority=" << (int)iface.routerPriority << "\n";
-
-        if (iface.neighbor) {
-            const NeighborData& nbr = *iface.neighbor;
-            f << "       nbr: id=" << nbr.IDNeighbor
-              << " state=" << nbrStateName(nbr.state)
-              << " ip=0x" << std::hex << nbr.IPNeighbor << std::dec
-              << " priority=" << (int)nbr.priorityNeighbor
-              << " options=0x" << std::hex << (int)nbr.optionsNeighbor << std::dec
-              << " master=" << nbr.isMaster
-              << " ddSeq=0x" << std::hex << nbr.ddSequenceNumber << std::dec
-              << " lastDdOpt=0x" << std::hex << (int)nbr.lastDdOptions << std::dec
-              << " lastDdIMs=0x" << std::hex << (int)nbr.lastDdIMs << std::dec
-              << " rxmtTimer=" << (nbr.rxmtTimer ? "YES" : "no")
-              << " inactivityTimer=" << (nbr.inactivityTimer ? "YES" : "no") << "\n";
-            f << "    databaseSummaryList (" << nbr.databaseSummaryList.size() << "):";
-            for (const auto& lsa : nbr.databaseSummaryList)
-                f << " type=" << (int)lsa.type
-                  << " id=0x" << std::hex << lsa.linkStateId << std::dec;
-            f << "\n";
-            f << "    linkStateRequestList (" << nbr.linkStateRequestList.size() << "):";
-            for (const auto& lsa : nbr.linkStateRequestList)
-                f << " type=" << (int)lsa.type
-                  << " id=0x" << std::hex << lsa.linkStateId << std::dec;
-            f << "\n";
-            f << "    linkStateRetransmissionList (" << nbr.linkStateRetransmissionList.size() << "):";
-            for (const auto& lr : nbr.linkStateRetransmissionList)
-                f << " type=" << (int)lr.LSType
-                  << " id=0x" << std::hex << lr.linkStateId << std::dec;
-            f << "\n";
-        }
-    }
-
-    f << "\n--- Area ---\n";
-    f << "  areaID=0x" << std::hex << area.areaID << std::dec
-      << " transit=" << area.transitCapability
-      << " extRouting=" << area.externalRoutingCapability
-      << " stubCost=" << area.stubDefaultCost << "\n";
-    f << "  interfaces: ";
-    for (int idx : area.interfaceIndices) f << idx << " ";
-    f << "\n";
-    f << "  LSDB: " << area.routerLSAs.size() << " Router-LSAs\n";
-    for (const auto& lsa : area.routerLSAs) {
-        f << "    [LSA] adv=" << lsa.header.advertisingRouter
-          << " seq=0x" << std::hex << (uint32_t)lsa.header.sequenceNumber << std::dec
-          << " age=" << lsa.header.age
-          << " links=" << lsa.numLinks << "\n";
-        for (const auto& link : lsa.links) {
-            const char* lt = "?";
-            if (link.type == 1) lt = "P2P";
-            else if (link.type == 3) lt = "Stub";
-            f << "      [" << lt << "] id=0x" << std::hex << link.linkID << std::dec
-              << " data=0x" << std::hex << link.linkData << std::dec
-              << " metric=" << link.metric << "\n";
-        }
-    }
-    f << "  SPF vertices: " << area.spfVertices.size() << " entries\n";
-    for (const auto& v : area.spfVertices) {
-        f << "    [V] id=0x" << std::hex << v.vertexId << std::dec
-          << " dist=" << v.distance << " nextHop=" << v.nextHop
-          << " parent=";
-        if (v.parent) f << "0x" << std::hex << v.parent->vertexId << std::dec;
-        else f << "null";
-        f << " nbrs=" << v.neighbors.size() << "\n";
-    }
-
-    f << "\n--- Routing Table (" << RoutingTable.size() << ") ---\n";
-    for (size_t i = 0; i < RoutingTable.size(); i++) {
-        const RoutingTableEntry& rte = RoutingTable[i];
-        f << "  [" << i << "] dest=0x" << std::hex << rte.destinationId << std::dec
-          << " mask=0x" << std::hex << rte.addressMask << std::dec
-          << " pathType=" << (int)rte.pathType
-          << " cost=" << rte.cost
-          << " nextHop=" << rte.nextHop << "\n";
-    }
-
-    f.close();
-}
-
-void OspfRouterState::logTransition(const char* subphase, const char* event,
-                                     double simtime, int ifIndex)
-{
-    namespace fs = std::filesystem;
-    std::string dir = std::string("state_dump/") + subphase;
-    fs::create_directories(dir);
-
-    // Tên file: <seq>_r<id>_<ifIdx>.log — seq global tăng dần để sort đúng thứ tự
-    static int globalSeq = 0;
-    int seq = ++globalSeq;
-
-    std::string filename = dir + "/" + std::to_string(seq)
-                         + "_r" + std::to_string(routerID)
-                         + "_" + std::to_string(ifIndex) + ".log";
-    std::ofstream f(filename);
-    if (!f.is_open()) return;
-
-    f << "t=" << simtime << " — " << event << "\n";
-    f << "Router ID: " << routerID << "  ifIndex=" << ifIndex << "\n\n";
-
-    f << "--- Interfaces (" << interfaces.size() << ") ---\n";
-    for (size_t i = 0; i < interfaces.size(); i++) {
-        const InterfaceData& iface = interfaces[i];
-        f << "  [" << i << "] type=" << iface.type
-          << " state=" << ifStateName(iface.state)
-          << " area=0x" << std::hex << iface.areaID << std::dec
-          << " cost=" << iface.cost
-          << " helloInt=" << iface.helloInterval
-          << " deadInt=" << iface.routerDeadInterval
-          << " rxmtInt=" << iface.rxmtInterval << "\n";
-        f << "       ip=0x" << std::hex << iface.ipAddress << std::dec
-          << " mask=0x" << std::hex << iface.mask << std::dec
-          << " priority=" << (int)iface.routerPriority
-          << " infTransDelay=" << iface.infTransDelay << "\n";
-        if (iface.neighbor) {
-            const NeighborData& nbr = *iface.neighbor;
-            f << "       nbr: id=" << nbr.IDNeighbor
-              << " state=" << nbrStateName(nbr.state)
-              << " ip=0x" << std::hex << nbr.IPNeighbor << std::dec
-              << " priority=" << (int)nbr.priorityNeighbor
-              << " options=0x" << std::hex << (int)nbr.optionsNeighbor << std::dec
-              << " master=" << nbr.isMaster
-              << " ddSeq=0x" << std::hex << nbr.ddSequenceNumber << std::dec
-              << " lastDdOpt=0x" << std::hex << (int)nbr.lastDdOptions << std::dec
-              << " lastDdIMs=0x" << std::hex << (int)nbr.lastDdIMs << std::dec
-              << " rxmtTimer=" << (nbr.rxmtTimer ? "YES" : "no")
-              << " inactivityTimer=" << (nbr.inactivityTimer ? "YES" : "no") << "\n";
-            f << "       databaseSummaryList (" << nbr.databaseSummaryList.size() << "):";
-            for (const auto& lsa : nbr.databaseSummaryList)
-                f << " type=" << (int)lsa.type
-                  << " id=0x" << std::hex << lsa.linkStateId << std::dec;
-            f << "\n";
-            f << "       linkStateRequestList (" << nbr.linkStateRequestList.size() << "):";
-            for (const auto& lsa : nbr.linkStateRequestList)
-                f << " type=" << (int)lsa.type
-                  << " id=0x" << std::hex << lsa.linkStateId << std::dec;
-            f << "\n";
-            f << "       linkStateRetransmissionList (" << nbr.linkStateRetransmissionList.size() << "):";
-            for (const auto& lr : nbr.linkStateRetransmissionList)
-                f << " type=" << (int)lr.LSType
-                  << " id=0x" << std::hex << lr.linkStateId << std::dec;
-            f << "\n";
-        }
-    }
-
-    f << "--- LSDB: " << area.routerLSAs.size() << " Router-LSAs ---\n";
-    f << "--- RoutingTable: " << RoutingTable.size() << " entries ---\n";
-
-    lastStateSubdir = subphase;
-    lastStateName = std::to_string(seq)
-                  + "_r" + std::to_string(routerID)
-                  + "_" + std::to_string(ifIndex);
-    f.close();
-}
 
 
 // ============================================================
@@ -508,7 +294,9 @@ void helloData::sendHello(int ifIndex, OspfRouterState& state, uint32_t routerId
     NeighborData* nbr = iface->neighbor;
 
     // Tạo Hello body (RFC A.3.2)
-    int nNbr = (nbr->IDNeighbor != 0) ? 1 : 0;
+    // Chi include neighbor trong Hello list khi neighbor that su hoat dong (state > DOWN)
+    // IDNeighbor duoc giu lai de flap lookup, nhung khong duoc dung trong Hello khi state=DOWN
+    int nNbr = (nbr->state > NBR_DOWN && nbr->IDNeighbor != 0) ? 1 : 0;
     int bodyLen = 20 + nNbr * 4;
     std::vector<uint8_t> body(bodyLen);
     int off = 0;

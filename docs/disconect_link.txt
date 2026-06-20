@@ -1,0 +1,297 @@
+# Kế hoạch: Cơ chế tắt/bật kết nối link theo kịch bản (v2)
+
+## 1. Mục tiêu
+
+- Đọc kịch bản từ file `link_flaps.txt`, mỗi router tự quản lý danh sách event + hẹn giờ tuần tự
+- Khi interface bị chặn: kiểm tra gói tin đến có nằm trong danh sách chặn → xóa msg, để OSPF tự xử lý
+  qua inactivity timer → NBR_DOWN → originate LSA → SPF
+
+## 2. Kiến trúc dữ liệu
+
+### 2.1 Cấu trúc event (`ospf.h`)
+
+```cpp
+// Một event tắt/bật link — chỉ lưu cho router hiện tại
+struct LinkFlapEvent {
+    simtime_t time;          // thời điểm kích hoạt
+    int targetRouterId;      // router bên kia link (dùng để lookup interface)
+    bool isDown;             // true=tắt link, false=bật link
+};
+```
+
+### 2.2 Member variables trong `routerOspf` (`ospf.h`)
+
+```cpp
+class routerOspf : public cSimpleModule
+{
+    // ... existing ...
+    // === Link Flap Scheduler ===
+    std::vector<LinkFlapEvent> flapEvents;   // danh sách event đã sort theo time
+    int flapTotal;                            // tổng số event
+    int flapRemaining;                        // số event còn lại chưa xử lý
+    cMessage* flapTimer;                      // 1 timer duy nhất cho event kế tiếp
+    std::set<int> blockedInterfaces;          // danh sách interface index đang bị chặn
+};
+```
+
+### 2.3 Sơ đồ vận hành
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ initialize()                                                     │
+│                                                                  │
+│   parseLinkFlaps("link_flaps.txt")                               │
+│     │                                                            │
+│     ├─ đọc file, lọc dòng có router này                           │
+│     ├─ tạo LinkFlapEvent{time, targetRouterId, isDown}           │
+│     ├─ sort theo time                                            │
+│     ├─ flapTotal = flapEvents.size()                             │
+│     ├─ flapRemaining = flapTotal                                 │
+│     └─ scheduleAt(flapEvents[0].time, flapTimer)                 │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ handleMessage() — self-message: flapTimer                        │
+│                                                                  │
+│   int idx = flapTotal - flapRemaining;   // event hiện tại       │
+│   LinkFlapEvent &ev = flapEvents[idx];                           │
+│                                                                  │
+│   // lookup interface từ targetRouterId                          │
+│   int ifIdx = findInterfaceByNeighbor(ev.targetRouterId);        │
+│                                                                  │
+│   if (ifIdx >= 0) {                                              │
+│       if (ev.isDown)                                             │
+│           blockedInterfaces.insert(ifIdx);   // thêm vào DS chặn │
+│       else                                                       │
+│           blockedInterfaces.erase(ifIdx);    // gỡ khỏi DS chặn  │
+│   }                                                              │
+│                                                                  │
+│   flapRemaining--;                                               │
+│                                                                  │
+│   if (flapRemaining > 0) {                                       │
+│       int nextIdx = flapTotal - flapRemaining;                   │
+│       scheduleAt(flapEvents[nextIdx].time, flapTimer);           │
+│   }                                                              │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ handleMessage() — chặn gói tin (sau self-message, trước OSPF)    │
+│                                                                  │
+│   if (!msg->isSelfMessage()) {                                   │
+│       int ifIndex = msg->getArrivalGate()->getIndex();           │
+│       if (blockedInterfaces.count(ifIndex)) {                    │
+│           delete msg;   // ← chặn: xóa luôn                     │
+│           return;                                                │
+│       }                                                          │
+│   }                                                              │
+│   // ... tiếp tục xử lý OSPF bình thường                         │
+│                                                                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+## 3. Các bước thực hiện
+
+### Bước 1: Thêm struct + member vào `ospf.h`
+
+```cpp
+// Trước class routerOspf:
+struct LinkFlapEvent {
+    simtime_t time;
+    int targetRouterId;
+    bool isDown;
+};
+
+// Trong class routerOspf, thêm vào private/protected:
+std::vector<LinkFlapEvent> flapEvents;
+int flapTotal = 0;
+int flapRemaining = 0;
+cMessage* flapTimer = nullptr;
+std::set<int> blockedInterfaces;
+```
+
+Cần include thêm: `#include <set>`
+
+### Bước 2: Parse file + khởi tạo scheduler trong `initialize()`
+
+File: `ospf.cc`
+
+```cpp
+void routerOspf::parseLinkFlaps(const char* filename)
+{
+    std::ifstream f(filename);
+    if (!f.is_open()) return;  // file không tồn tại → bỏ qua
+
+    std::string myName = getName();  // "r1", "r2", ...
+    int myId = std::stoi(myName.substr(1));
+
+    std::string line;
+    while (std::getline(f, line)) {
+        if (line.empty() || line[0] == '#') continue;
+
+        std::istringstream iss(line);
+        std::string rA, rB, action;
+        double t;
+        if (!(iss >> rA >> rB >> action >> t)) continue;
+
+        // Lọc: có liên quan đến router này không?
+        int targetId = -1;
+        if (rA == myName)       targetId = std::stoi(rB.substr(1));
+        else if (rB == myName)  targetId = std::stoi(rA.substr(1));
+        else continue;  // không liên quan
+
+        bool isDown;
+        if (action == "down")       isDown = true;
+        else if (action == "up")    isDown = false;
+        else continue;  // action không hợp lệ
+
+        LinkFlapEvent ev;
+        ev.time = simTime() + t;
+        ev.targetRouterId = targetId;
+        ev.isDown = isDown;
+        flapEvents.push_back(ev);
+    }
+
+    // Sort theo time
+    std::sort(flapEvents.begin(), flapEvents.end(),
+        [](const LinkFlapEvent& a, const LinkFlapEvent& b) {
+            return a.time < b.time;
+        });
+
+    flapTotal = (int)flapEvents.size();
+    flapRemaining = flapTotal;
+
+    // Schedule event đầu tiên
+    if (flapRemaining > 0) {
+        flapTimer = new cMessage("flapTimer");
+        scheduleAt(flapEvents[0].time, flapTimer);
+    }
+}
+```
+
+Gọi trong `initialize()`:
+```cpp
+parseLinkFlaps("link_flaps.txt");
+```
+
+### Bước 3: Xử lý flapTimer trong `handleMessage()`
+
+File: `ospf.cc`, trong self-message section:
+
+```cpp
+} else if (msg == flapTimer) {
+    // Lấy event hiện tại: index = total - remaining
+    int evIdx = flapTotal - flapRemaining;
+    LinkFlapEvent& ev = flapEvents[evIdx];
+
+    // Lookup interface từ targetRouterId
+    int ifIdx = findInterfaceByNeighbor(ev.targetRouterId);
+    if (ifIdx >= 0) {
+        if (ev.isDown) {
+            blockedInterfaces.insert(ifIdx);
+            EV << "Interface " << ifIdx << " (→r" << ev.targetRouterId
+               << ") BLOCKED at t=" << simTime() << "\n";
+        } else {
+            blockedInterfaces.erase(ifIdx);
+            EV << "Interface " << ifIdx << " (→r" << ev.targetRouterId
+               << ") UNBLOCKED at t=" << simTime() << "\n";
+        }
+    } else {
+        EV << "WARNING: link to r" << ev.targetRouterId
+           << " not found, skipping\n";
+    }
+
+    flapRemaining--;
+
+    // Schedule event kế tiếp
+    if (flapRemaining > 0) {
+        int nextIdx = flapTotal - flapRemaining;
+        scheduleAt(flapEvents[nextIdx].time, msg);
+    } else {
+        flapTimer = nullptr;
+        delete msg;
+    }
+```
+
+### Bước 4: Chặn gói tin ở đầu `handleMessage()`
+
+File: `ospf.cc`, ngay SAU self-message block, TRƯỚC protocol processing:
+
+```cpp
+// === LINK FLAP BLOCK CHECK ===
+if (!msg->isSelfMessage() && !blockedInterfaces.empty()) {
+    int ifIndex = msg->getArrivalGate()->getIndex();
+    if (blockedInterfaces.count(ifIndex)) {
+        delete msg;
+        return;
+    }
+}
+```
+
+Lưu ý: `!blockedInterfaces.empty()` là shortcut optimization — nếu không có interface nào
+bị chặn thì khỏi phải `getArrivalGate()->getIndex()` làm gì.
+
+### Bước 5: Helper `findInterfaceByNeighbor()`
+
+File: `ospf.cc`:
+
+```cpp
+int routerOspf::findInterfaceByNeighbor(uint32_t targetId) {
+    for (int i = 0; i < (int)state->interfaces.size(); i++) {
+        NeighborData* nbr = state->interfaces[i].neighbor;
+        if (nbr && nbr->IDNeighbor == targetId)
+            return i;
+    }
+    return -1;  // không tìm thấy → link không tồn tại
+}
+```
+
+### Bước 6: Cleanup trong `finish()`
+
+```cpp
+if (flapTimer) cancelAndDelete(flapTimer);
+```
+
+## 4. Tổng kết thay đổi
+
+| File | Thay đổi | Dòng |
+|------|----------|------|
+| `ospf.h` | Struct `LinkFlapEvent` + member variables + khai báo 2 hàm | ~12 |
+| `ospf.cc` | Bước 2: `parseLinkFlaps()` | ~35 |
+| `ospf.cc` | Bước 3: xử lý `flapTimer` trong handleMessage | ~25 |
+| `ospf.cc` | Bước 4: chặn msg ở đầu handleMessage | ~7 |
+| `ospf.cc` | Bước 5: `findInterfaceByNeighbor()` | ~7 |
+| `ospf.cc` | Bước 6: cleanup finish() | ~1 |
+| `ospf.cc` | Include `<fstream>`, `<sstream>`, `<set>` | ~3 |
+| **Tổng** | | **~90 dòng** |
+
+## 5. Edge cases
+
+1. **Dòng không hợp lệ** (link không tồn tại, sai format):
+   → `findInterfaceByNeighbor()` trả về -1 khi timer cháy → log warning → skip
+   → `blockedInterfaces` không đổi, `flapRemaining` vẫn giảm
+
+2. **Timer cháy trước khi Hello xong** (IDNeighbor chưa biết):
+   → `findInterfaceByNeighbor()` trả về -1 → log warning → skip
+   → Chấp nhận được vì flap xảy ra sau vài giây
+
+3. **Link up trở lại**:
+   → `blockedInterfaces.erase(ifIdx)` → gói tin bắt đầu đến
+   → Hello từ neighbor → processHello chạy → adjacency tự thiết lập lại
+
+4. **File không tồn tại**:
+   → `parseLinkFlaps()` thấy `!f.is_open()` → return ngay
+   → `flapTotal = 0` → không schedule timer → chạy bình thường
+
+5. **Dòng trống / comment**:
+   → Bỏ qua dòng rỗng và dòng bắt đầu bằng `#`
+
+## 6. Không làm
+
+- Không đụng vào channel (`setDisabled`)
+- Không xóa neighbor state chủ động (để inactivity timer + OSPF tự xử lý)
+- Không originate LSA ngay (để SPF timer tự xử lý sau khi inactivity cháy)
+- Mỗi router tự quản lý scheduler riêng, không giao tiếp

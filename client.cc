@@ -1,6 +1,5 @@
 #include "client.h"
 #include "ospf_m.h"
-#include "ospf_struct.h"  // for OspfRouterState, logTransition helper via extern?
 
 Define_Module(Client);
 
@@ -34,9 +33,6 @@ void Client::handleMessage(cMessage *msg)
                        | ((uint32_t)dataMsg->getPayload(5) << 16)
                        | ((uint32_t)dataMsg->getPayload(6) << 8)
                        |  dataMsg->getPayload(7);
-
-        // Ghi log nhận (dùng EV hoặc tự ghi file)
-        EV << "R" << routerId << " Rcvd:" << srcId << "->self" << std::endl;
 
         delete msg;
         return;
