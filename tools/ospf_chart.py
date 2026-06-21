@@ -132,9 +132,10 @@ def build_echarts_option(timeline):
         router = key.split("/")[0]
         color = ROUTER_COLORS.get(router, "#999999")
 
-        # State series (trái Y, step chart) - always even index
+        # State series (trái Y, step chart)
+        state_name = key + " [state]"
         series.append({
-            "name": key,
+            "name": state_name,
             "type": "line",
             "step": "end",
             "yAxisIndex": 0,
@@ -144,9 +145,10 @@ def build_echarts_option(timeline):
             "symbol": "none",
         })
 
-        # Total series (phải Y, line chart) - always odd index
+        # Total series (phải Y, line chart)
+        total_name = key + " [total]"
         series.append({
-            "name": key,
+            "name": total_name,
             "type": "line",
             "yAxisIndex": 1,
             "data": total_data[key],
@@ -156,7 +158,8 @@ def build_echarts_option(timeline):
             "symbolSize": 3,
         })
 
-        legend_data.append(key)
+        legend_data.append(state_name)
+        legend_data.append(total_name)
 
     option = {
         "tooltip": {
@@ -254,6 +257,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     <button onclick="hideAll()">Ẩn tất cả</button>
     <span style="color:#6c7086;margin:0 4px;">|</span>
     ROUTER_FILTERS_PLACEHOLDER
+    <span style="color:#6c7086;margin:0 4px;">|</span>
+    <button onclick="zoomIn()" title="Phóng to">🔍➕</button>
+    <button onclick="zoomOut()" title="Thu nhỏ">🔍➖</button>
+    <button onclick="zoomReset()" title="Reset zoom">↺</button>
   </div>
 </div>
 <div id="chart"></div>
@@ -278,8 +285,10 @@ CHART_OPTION.tooltip.formatter = function(params) {
     var val = p.value[1];
     var name = p.seriesName;
     var color = p.color;
-    // Odd seriesIndex = total (right Y), even = state (left Y)
-    var isTotal = (p.seriesIndex % 2 === 1);
+    // Detect type from series name suffix
+    var isTotal = (name.indexOf(' [total]') !== -1);
+    // Strip suffix to get base key: "r2/if0 [total]" → "r2/if0"
+    var baseKey = name.replace(' [state]', '').replace(' [total]', '');
 
     // Tìm interface data trong timeline
     var snap = TIMELINE_DATA[seq];
@@ -287,13 +296,13 @@ CHART_OPTION.tooltip.formatter = function(params) {
     if (snap && snap.interfaces) {
       for (var j = 0; j < snap.interfaces.length; j++) {
         var ifKey = snap.router + '/if' + snap.interfaces[j].idx;
-        if (ifKey === name) { ifaceData = snap.interfaces[j]; break; }
+        if (ifKey === baseKey) { ifaceData = snap.interfaces[j]; break; }
       }
     }
 
     if (isTotal && ifaceData) {
       html += '<div style="margin-bottom:8px;">' +
-        '<b style="color:' + color + '">' + name + ' → ' + ifaceData.neighborId + '</b><br>' +
+        '<b style="color:' + color + '">' + baseKey + ' → ' + ifaceData.neighborId + '</b><br>' +
         'databaseSummaryList: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;' + ifaceData.dsl + '<br>' +
         'linkStateRequestList: &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;' + ifaceData.lsr + '<br>' +
         'linkStateRetransmissionList: ' + ifaceData.ret + '<br>' +
@@ -303,7 +312,7 @@ CHART_OPTION.tooltip.formatter = function(params) {
     } else if (!isTotal && ifaceData) {
       var stateName = STATE_NAMES[val] || ('?' + val);
       html += '<div style="margin-bottom:4px;">' +
-        '<b style="color:' + color + '">' + name + ' → ' + ifaceData.neighborId + '</b><br>' +
+        '<b style="color:' + color + '">' + baseKey + ' → ' + ifaceData.neighborId + '</b><br>' +
         'State: <b>' + stateName + '</b> | Seq: ' + seq + '<br>' +
         '</div>';
     }
@@ -333,6 +342,7 @@ function toggleRouter(router, checked) {
   var allData = legend.get('data');
   for (var i = 0; i < allData.length; i++) {
     var name = allData[i];
+    // Match both "r2/if0 [state]" and "r2/if0 [total]"
     if (name.indexOf(router + '/') === 0) {
       myChart.dispatchAction({
         type: checked ? 'legendSelect' : 'legendUnSelect',
@@ -340,6 +350,41 @@ function toggleRouter(router, checked) {
       });
     }
   }
+}
+
+// ── Zoom controls ──
+function zoomIn() {
+  var option = myChart.getOption();
+  if (!option.dataZoom || !option.dataZoom[0]) return;
+  var dz = option.dataZoom[0];
+  var start = dz.start || 0;
+  var end = dz.end || 100;
+  var range = end - start;
+  if (range <= 1) return; // đã zoom tối đa
+  var center = (start + end) / 2;
+  var newRange = Math.max(1, range * 0.5);
+  var newStart = Math.max(0, center - newRange / 2);
+  var newEnd = Math.min(100, center + newRange / 2);
+  myChart.dispatchAction({type: 'dataZoom', dataZoomIndex: 0, start: newStart, end: newEnd});
+}
+
+function zoomOut() {
+  var option = myChart.getOption();
+  if (!option.dataZoom || !option.dataZoom[0]) return;
+  var dz = option.dataZoom[0];
+  var start = dz.start || 0;
+  var end = dz.end || 100;
+  var range = end - start;
+  if (range >= 100) return; // đã zoom out tối đa
+  var center = (start + end) / 2;
+  var newRange = Math.min(100, range * 2);
+  var newStart = Math.max(0, center - newRange / 2);
+  var newEnd = Math.min(100, center + newRange / 2);
+  myChart.dispatchAction({type: 'dataZoom', dataZoomIndex: 0, start: newStart, end: newEnd});
+}
+
+function zoomReset() {
+  myChart.dispatchAction({type: 'dataZoom', dataZoomIndex: 0, start: 0, end: 100});
 }
 </script>
 </body>
