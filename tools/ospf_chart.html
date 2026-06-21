@@ -113,20 +113,19 @@ window.addEventListener('resize', function() { myChart.resize(); });
 
 function showAll() { myChart.dispatchAction({type: 'legendAllSelect'}); }
 function hideAll() {
-  var legend = myChart.getModel().getComponentsByType('legend')[0];
-  if (!legend) return;
-  var allData = legend.get('data');
-  for (var i = 0; i < allData.length; i++) {
-    myChart.dispatchAction({type: 'legendUnSelect', name: allData[i]});
+  var opt = myChart.getOption();
+  if (opt.series) {
+    for (var i = 0; i < opt.series.length; i++) {
+      myChart.dispatchAction({type: 'legendUnSelect', name: opt.series[i].name});
+    }
   }
 }
 
 function toggleRouter(router, checked) {
-  var legend = myChart.getModel().getComponentsByType('legend')[0];
-  if (!legend) return;
-  var allData = legend.get('data');
-  for (var i = 0; i < allData.length; i++) {
-    var name = allData[i];
+  var opt = myChart.getOption();
+  if (!opt.series) return;
+  for (var i = 0; i < opt.series.length; i++) {
+    var name = opt.series[i].name;
     // Match both "r2/if0 [state]" and "r2/if0 [total]"
     if (name.indexOf(router + '/') === 0) {
       myChart.dispatchAction({
