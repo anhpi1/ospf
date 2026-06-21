@@ -318,7 +318,14 @@ myChart.setOption(CHART_OPTION);
 window.addEventListener('resize', function() { myChart.resize(); });
 
 function showAll() { myChart.dispatchAction({type: 'legendAllSelect'}); }
-function hideAll() { myChart.dispatchAction({type: 'legendInverseSelect'}); }
+function hideAll() {
+  var legend = myChart.getModel().getComponentsByType('legend')[0];
+  if (!legend) return;
+  var allData = legend.get('data');
+  for (var i = 0; i < allData.length; i++) {
+    myChart.dispatchAction({type: 'legendUnSelect', name: allData[i]});
+  }
+}
 
 function toggleRouter(router, checked) {
   var legend = myChart.getModel().getComponentsByType('legend')[0];
@@ -355,10 +362,9 @@ def render_html(timeline, option, output_path="tools/ospf_chart.html"):
         )
 
     # Serialize data cho JS
-    import json as _json
-    timeline_js = _json.dumps(timeline, ensure_ascii=False)
-    state_names_js = _json.dumps(STATE_NAMES, ensure_ascii=False)
-    option_js = _json.dumps(option, ensure_ascii=False)
+    timeline_js = json.dumps(timeline, ensure_ascii=False)
+    state_names_js = json.dumps(STATE_NAMES, ensure_ascii=False)
+    option_js = json.dumps(option, ensure_ascii=False)
 
     # Thay placeholders
     html = HTML_TEMPLATE

@@ -106,7 +106,14 @@ myChart.setOption(CHART_OPTION);
 window.addEventListener('resize', function() { myChart.resize(); });
 
 function showAll() { myChart.dispatchAction({type: 'legendAllSelect'}); }
-function hideAll() { myChart.dispatchAction({type: 'legendInverseSelect'}); }
+function hideAll() {
+  var legend = myChart.getModel().getComponentsByType('legend')[0];
+  if (!legend) return;
+  var allData = legend.get('data');
+  for (var i = 0; i < allData.length; i++) {
+    myChart.dispatchAction({type: 'legendUnSelect', name: allData[i]});
+  }
+}
 
 function toggleRouter(router, checked) {
   var legend = myChart.getModel().getComponentsByType('legend')[0];
