@@ -1,0 +1,132 @@
+Quét bin files từ 'bin/' ...
+  Tổng bin: 2682  |  Data packets (8-byte): 114  |  Event groups: 1
+
+==============================================================================
+  EVENT GROUP: t ≈ 300s
+  Kỳ vọng: 90 cặp (src→dest)  |  Phát hiện: 56 cặp  |  Mất: 34 cặp
+==============================================================================
+
+  Kết quả: 56/90 DELIVERED (62.2%)
+           34/90 DROPPED (37.8%)
+
+  Cặp bị mất (không có observation nào - router không có route):
+    r1 → r2, r3, r4, r5, r6, r7, r8, r9, r10
+    r10 → r1, r2, r3, r4, r5, r6, r7, r8, r9
+    r2 → r1, r10
+    r3 → r1, r10
+    r4 → r1, r10
+    r5 → r1, r10
+    r6 → r1, r10
+    r7 → r1, r10
+    r8 → r1, r10
+    r9 → r1, r10
+
+  Src   Dest  Status     Hops  Obs  Path
+  ----- ----- ---------- ----- ---- ----------------------------------------
+  r2    r3    DELIVERED  1     1    r2 → r3 ✓
+  r2    r4    DELIVERED  1     1    r2 → r4 ✓
+  r2    r5    DELIVERED  1     1    r2 → r5 ✓
+  r2    r6    DELIVERED  2     2    r2 → r4 → r6 ✓
+  r2    r7    DELIVERED  2     2    r2 → r5 → r7 ✓
+  r2    r8    DELIVERED  2     2    r2 → r3 → r8 ✓
+  r2    r9    DELIVERED  2     2    r2 → r5 → r9 ✓
+  r3    r2    DELIVERED  1     1    r3 → r2 ✓
+  r3    r4    DELIVERED  2     2    r3 → r2 → r4 ✓
+  r3    r5    DELIVERED  2     2    r3 → r9 → r5 ✓
+  r3    r6    DELIVERED  3     3    r3 → r2 → r4 → r6 ✓
+  r3    r7    DELIVERED  3     3    r3 → r9 → r5 → r7 ✓
+  r3    r8    DELIVERED  1     1    r3 → r8 ✓
+  r3    r9    DELIVERED  1     1    r3 → r9 ✓
+  r4    r2    DELIVERED  1     1    r4 → r2 ✓
+  r4    r3    DELIVERED  2     2    r4 → r2 → r3 ✓
+  r4    r5    DELIVERED  1     1    r4 → r5 ✓
+  r4    r6    DELIVERED  1     1    r4 → r6 ✓
+  r4    r7    DELIVERED  2     2    r4 → r5 → r7 ✓
+  r4    r8    DELIVERED  3     3    r4 → r2 → r3 → r8 ✓
+  r4    r9    DELIVERED  2     2    r4 → r5 → r9 ✓
+  r5    r2    DELIVERED  1     1    r5 → r2 ✓
+  r5    r3    DELIVERED  2     2    r5 → r9 → r3 ✓
+  r5    r4    DELIVERED  1     1    r5 → r4 ✓
+  r5    r6    DELIVERED  2     2    r5 → r4 → r6 ✓
+  r5    r7    DELIVERED  1     1    r5 → r7 ✓
+  r5    r8    DELIVERED  3     3    r5 → r9 → r3 → r8 ✓
+  r5    r9    DELIVERED  1     1    r5 → r9 ✓
+  r6    r2    DELIVERED  2     2    r6 → r4 → r2 ✓
+  r6    r3    DELIVERED  3     3    r6 → r4 → r2 → r3 ✓
+  r6    r4    DELIVERED  1     1    r6 → r4 ✓
+  r6    r5    DELIVERED  2     2    r6 → r4 → r5 ✓
+  r6    r7    DELIVERED  3     3    r6 → r4 → r5 → r7 ✓
+  r6    r8    DELIVERED  4     4    r6 → r4 → r2 → r3 → r8 ✓
+  r6    r9    DELIVERED  3     3    r6 → r4 → r5 → r9 ✓
+  r7    r2    DELIVERED  2     2    r7 → r5 → r2 ✓
+  r7    r3    DELIVERED  3     3    r7 → r5 → r9 → r3 ✓
+  r7    r4    DELIVERED  2     2    r7 → r5 → r4 ✓
+  r7    r5    DELIVERED  1     1    r7 → r5 ✓
+  r7    r6    DELIVERED  3     3    r7 → r5 → r4 → r6 ✓
+  r7    r8    DELIVERED  4     4    r7 → r5 → r9 → r3 → r8 ✓
+  r7    r9    DELIVERED  2     2    r7 → r5 → r9 ✓
+  r8    r2    DELIVERED  2     2    r8 → r3 → r2 ✓
+  r8    r3    DELIVERED  1     1    r8 → r3 ✓
+  r8    r4    DELIVERED  3     3    r8 → r3 → r2 → r4 ✓
+  r8    r5    DELIVERED  3     3    r8 → r3 → r9 → r5 ✓
+  r8    r6    DELIVERED  4     4    r8 → r3 → r2 → r4 → r6 ✓
+  r8    r7    DELIVERED  4     4    r8 → r3 → r9 → r5 → r7 ✓
+  r8    r9    DELIVERED  2     2    r8 → r3 → r9 ✓
+  r9    r2    DELIVERED  2     2    r9 → r5 → r2 ✓
+  r9    r3    DELIVERED  1     1    r9 → r3 ✓
+  r9    r4    DELIVERED  2     2    r9 → r5 → r4 ✓
+  r9    r5    DELIVERED  1     1    r9 → r5 ✓
+  r9    r6    DELIVERED  3     3    r9 → r5 → r4 → r6 ✓
+  r9    r7    DELIVERED  2     2    r9 → r5 → r7 ✓
+  r9    r8    DELIVERED  2     2    r9 → r3 → r8 ✓
+  r1    r2    DROPPED    -     0    (no route)
+  r1    r3    DROPPED    -     0    (no route)
+  r1    r4    DROPPED    -     0    (no route)
+  r1    r5    DROPPED    -     0    (no route)
+  r1    r6    DROPPED    -     0    (no route)
+  r1    r7    DROPPED    -     0    (no route)
+  r1    r8    DROPPED    -     0    (no route)
+  r1    r9    DROPPED    -     0    (no route)
+  r1    r10   DROPPED    -     0    (no route)
+  r2    r1    DROPPED    -     0    (no route)
+  r2    r10   DROPPED    -     0    (no route)
+  r3    r1    DROPPED    -     0    (no route)
+  r3    r10   DROPPED    -     0    (no route)
+  r4    r1    DROPPED    -     0    (no route)
+  r4    r10   DROPPED    -     0    (no route)
+  r5    r1    DROPPED    -     0    (no route)
+  r5    r10   DROPPED    -     0    (no route)
+  r6    r1    DROPPED    -     0    (no route)
+  r6    r10   DROPPED    -     0    (no route)
+  r7    r1    DROPPED    -     0    (no route)
+  r7    r10   DROPPED    -     0    (no route)
+  r8    r1    DROPPED    -     0    (no route)
+  r8    r10   DROPPED    -     0    (no route)
+  r9    r1    DROPPED    -     0    (no route)
+  r9    r10   DROPPED    -     0    (no route)
+  r10   r1    DROPPED    -     0    (no route)
+  r10   r2    DROPPED    -     0    (no route)
+  r10   r3    DROPPED    -     0    (no route)
+  r10   r4    DROPPED    -     0    (no route)
+  r10   r5    DROPPED    -     0    (no route)
+  r10   r6    DROPPED    -     0    (no route)
+  r10   r7    DROPPED    -     0    (no route)
+  r10   r8    DROPPED    -     0    (no route)
+  r10   r9    DROPPED    -     0    (no route)
+
+  Thống kê theo nguồn (source router):
+  Src   Kỳ vọng  Delivered  Dropped   Rate   
+  ----- -------- ---------- --------- -------
+  r1    9        0          9         0     %
+  r2    9        7          2         78    %
+  r3    9        7          2         78    %
+  r4    9        7          2         78    %
+  r5    9        7          2         78    %
+  r6    9        7          2         78    %
+  r7    9        7          2         78    %
+  r8    9        7          2         78    %
+  r9    9        7          2         78    %
+  r10   9        0          9         0     %
+
+  Thống kê hops (DELIVERED):
+    Min: 1   Max: 4   Avg: 2.0

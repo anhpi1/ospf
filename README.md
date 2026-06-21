@@ -42,31 +42,91 @@ Bắt đầu từ `ospf.h` — lớp `routerOspf` chỉ có 3 hàm chính:
 
 ## Phân tích kết quả
 
-### `tools/viz_topology_ascii.py`
-
-Đọc file JSON dump OSPF, vẽ topology ASCII + bảng định tuyến + trạng thái interface cho **toàn bộ 10 router**. Cách hoạt động:
-
-- Chọn 1 file dump làm thời điểm tham chiếu (`t_ref`)
-- Với mỗi router, tự động tìm file JSON có `simTime` gần `t_ref` nhất (delta tối thiểu)
-- Tìm kiếm 2 chiều: tiến và lùi theo thời gian
-- Vẽ topology với vị trí node cố định, link P2P là dấu `.`
-- Đánh dấu router tham chiếu bằng `R#` và `<--`
+### Quy trình phân tích nhanh (khuyến nghị)
 
 ```bash
-# Liệt kê các dump
-python3 tools/viz_topology_ascii.py --list
+# Bước 1: Biên dịch toàn bộ output (chạy 1 lần, ~vài phút)
+python3 tools/viz_topology_ascii.py --all --workers 8
+python3 tools/parse_bin.py --all --workers 8
 
-# Vẽ topology + routing table (từ thời điểm file 100.json)
-python3 tools/viz_topology_ascii.py log/100.json
+# Bước 2: Khởi động web viewer
+python3 tools/viewer.py
 
-# Dump mới nhất
-python3 tools/viz_topology_ascii.py --latest
-
-# Ghi ra file
-python3 tools/viz_topology_ascii.py log/100.json -o output.txt
+# Bước 3: Mở browser http://localhost:8080
+#   Tab "Topology Viz" — duyệt topology theo router + seq
+#   Tab "Parse Bin"    — duyệt gói tin theo seq, hiện đường dẫn + nội dung
+#   Giữ nút Prev/Next để quét nhanh, tự động nhảy seq gần nhất nếu không có
 ```
 
-Output là file text chứa: topology ASCII + bảng định tuyến + trạng thái interface của **từng router trong 10 router**.
+### `tools/viewer.py` — Web Viewer
+
+Server HTTP đọc file tĩnh từ `resultlog/` và `resultbin/` (đã biên dịch trước). Giao diện 2 tab:
+
+- **Tab Topology Viz**: chọn router (r1-r10) → nhập seq → Prev/Next ±1 → hiển thị topology ASCII của riêng router đó
+- **Tab Parse Bin**: nhập seq → Prev/Next ±1 → hiển thị danh sách đường dẫn + nội dung gói tin OSPF đã parse
+
+```bash
+python3 tools/viewer.py                  # mặc định port 8080
+python3 tools/viewer.py --port 9090      # đổi port
+```
+
+### `tools/viz_topology_ascii.py`
+
+Đọc file JSON dump OSPF, vẽ topology ASCII + bảng định tuyến + trạng thái interface.
+
+```bash
+# Single-seq mode: vẽ topology cho 1 seq (merge 10 router tại cùng thời điểm)
+python3 tools/viz_topology_ascii.py 500
+python3 tools/viz_topology_ascii.py log/r1/500.json
+python3 tools/viz_topology_ascii.py --latest
+python3 tools/viz_topology_ascii.py 500 -o output.txt
+
+# List mode: liệt kê tất cả dump
+python3 tools/viz_topology_ascii.py --list
+
+# --all mode: biên dịch toàn bộ log/ → resultlog/ (mỗi file JSON → 1 file txt riêng cho router đó)
+python3 tools/viz_topology_ascii.py --all --workers 8
+```
+
+### `tools/parse_bin.py`
+
+Đọc file binary `.bin` chứa gói tin OSPF và hiển thị nội dung theo RFC 2328 format.
+
+```bash
+# Single-seq mode
+python3 tools/parse_bin.py 1032
+python3 tools/parse_bin.py 1032 -o parsed_1032.txt
+python3 tools/parse_bin.py bin/r1/if0/NBR_FULL/000001_0_010000.bin
+
+# --all mode: biên dịch toàn bộ bin/ → resultbin/ (mirror cấu trúc thư mục)
+python3 tools/parse_bin.py --all --workers 8
+```
+
+### Cấu trúc thư mục dữ liệu
+
+```
+bin/                          ← gói tin OSPF nhị phân (đầu vào cho parse_bin.py)
+  {router}/                   ← r1..r10
+    {interface}/              ← if0, if1, if2...
+      {neighbor_state}/       ← NBR_DOWN, NBR_INIT, NBR_TWOWAY, NBR_EXSTART,
+                                NBR_EXCHANGE, NBR_LOADING, NBR_FULL
+        {seq:06d}_{simTime}.bin
+    client/                   ← gói từ clientGate (không có neighbor state)
+
+log/                          ← JSON dump trạng thái router (đầu vào cho viz_topology_ascii.py)
+  {router}/                   ← r1..r10
+    {counter}.json
+
+resultlog/                    ← output của viz_topology_ascii.py --all (mirror log/)
+  {router}/                   ← r1..r10
+    {counter}.txt
+
+resultbin/                    ← output của parse_bin.py --all (mirror bin/)
+  {router}/{interface}/{state}/{seq}_{simTime}.txt
+```
+
+- **Seq/counter là mã định danh duy nhất** — dùng để tra cứu file không cần biết đường dẫn cha
+- `--all` biên dịch 1 lần, viewer đọc file tĩnh → phản hồi microsecond
 
 
 ## Build và chạy

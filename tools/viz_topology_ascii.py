@@ -6,11 +6,12 @@ OSPF LSDB Topology Visualizer
 Kèm bảng định tuyến của mỗi router.
 
 Usage:
-    python3 tools/viz_topology_ascii.py log/10.json
+    python3 tools/viz_topology_ascii.py log/r1/10.json
     python3 tools/viz_topology_ascii.py --latest
 """
 
 import json, argparse, os, sys, glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 FIXED_POSITIONS = {
     'R1':  (3, 3), 'R2':  (3, 10), 'R3':  (3, 17), 'R8':  (3, 24),
@@ -134,6 +135,14 @@ def fmt_rt(entries):
         lines.append(f"  {dst:<16} {tp:<4} {cost:<6} {nh:<10}")
     return '\n'.join(lines)
 
+def find_all_jsons(dumps_dir):
+    """Trả về tất cả file JSON trong dumps_dir: cả flat (cũ) lẫn thư mục con (mới)."""
+    # Cấu trúc mới: log/r1/xxx.json
+    files = glob.glob(os.path.join(dumps_dir, '*', '*.json'))
+    # Cấu trúc cũ: log/xxx.json (flat)
+    files.extend(glob.glob(os.path.join(dumps_dir, '*.json')))
+    return files
+
 def find_best_dumps(dumps_dir, ref_dump_path):
     """Tìm file JSON gần simTime nhất cho mỗi router (R1-R10) quanh thời điểm ref.
     Trả về dict {router_name: (file_path, sim_time, dump_num)}."""
@@ -145,7 +154,7 @@ def find_best_dumps(dumps_dir, ref_dump_path):
     # Duyệt tất cả file, tìm file tốt nhất cho mỗi router
     best = {}  # router_name → (path, sim_time, best_delta, dump_num)
 
-    for fpath in glob.glob(os.path.join(dumps_dir, '*.json')):
+    for fpath in find_all_jsons(dumps_dir):
         try:
             with open(fpath) as f:
                 data = json.load(f)
@@ -165,12 +174,14 @@ def find_best_dumps(dumps_dir, ref_dump_path):
     return {r: (p, t, dn) for r, (p, t, _d, dn, _rid) in best.items()}
 
 def list_dumps(dumps_dir):
-    files = sorted(glob.glob(os.path.join(dumps_dir, '*.json')),
+    files = sorted(glob.glob(os.path.join(dumps_dir, '*', '*.json')),
                    key=lambda x: int(x.split('/')[-1].split('.')[0]))
-    print(f"{'File':<20} {'LSAs':<8} {'Routes':<8} {'Trang thai'}")
-    print('-' * 50)
+    print(f"{'File':<24} {'LSAs':<8} {'Routes':<8} {'Trang thai'}")
+    print('-' * 54)
     for fpath in files:
+        router_dir = os.path.basename(os.path.dirname(fpath))
         fname = os.path.basename(fpath)
+        display_name = f"{router_dir}/{fname}"
         try:
             with open(fpath) as f:
                 data = json.load(f)
@@ -178,47 +189,63 @@ def list_dumps(dumps_dir):
             n_lsa = len(data.get('state', {}).get('area', {}).get('routerLSAs', []))
             n_rt = len(data.get('state', {}).get('routingTable', []))
             stt = 'Co routing' if n_rt > 0 else f'{n_lsa} LSA'
-            print(f"{fname:<20} {n_lsa:<8} {n_rt:<8} {stt}")
+            print(f"{display_name:<24} {n_lsa:<8} {n_rt:<8} {stt}")
         except Exception as e:
-            print(f"{fname:<20} {'LOI':<8} {'':<8} {e}")
+            print(f"{display_name:<24} {'LOI':<8} {'':<8} {e}")
 
-def main():
-    p = argparse.ArgumentParser(description='Ve topology + bang dinh tuyen tu LSDB')
-    p.add_argument('dump', nargs='?')
-    p.add_argument('--latest', '-l', action='store_true')
-    p.add_argument('--list', '-L', action='store_true')
-    p.add_argument('--output', '-o')
-    args = p.parse_args()
+def process_single_file(json_path, out_path):
+    """Xử lý 1 file JSON của 1 router, vẽ topology cho router đó, ghi ra out_path."""
+    lsdb, rt, ifaces, simtimes = parse_dump(json_path)
 
-    dumps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','log')
-    if not os.path.isdir(dumps_dir):
-        print(f"Loi: khong tim thay {dumps_dir}", file=sys.stderr); sys.exit(1)
+    # Lấy tên router từ dữ liệu trong file
+    with open(json_path) as f:
+        data = json.load(f)
+    center = ip2r(data['routerId'])
+    ftime = data.get('simTime', 0)
 
-    if args.list:
-        list_dumps(dumps_dir); return
+    edges = lsdb.get(center, set())
 
-    dump_path = None
-    if args.dump: dump_path = args.dump
-    elif args.latest:
-        dump_path = max(glob.glob(os.path.join(dumps_dir,'*.json')),
-                        key=lambda x: int(x.split('/')[-1].split('.')[0]))
-        print(f"Dung dump: {dump_path}")
-    else:
-        p.print_help(); return
+    c = Canvas(ROWS, COLS)
+    c.draw_graph(edges, center)
+    c.border()
+    c.write(1, 2, f"t={ftime:.2f}s {center}")
+    fdnum = os.path.splitext(os.path.basename(json_path))[0]
+    info = f"LSDB:{len(edges)} link  (dump {fdnum})"
+    c.write(ROWS-2, 2, info)
 
-    # Tìm file gần nhất theo simTime cho từng router (R1-R10)
+    rt_text = f"Bang dinh tuyen {center}:\n{fmt_rt(rt.get(center, []))}"
+
+    iface_lines = [f"Trang thai interface {center}:"]
+    for ifc in ifaces.get(center, []):
+        nb = ifc.get('neighbor', {})
+        nb_id = nb.get('IDNeighbor', '?')
+        nb_name = ip2r(nb_id) if nb_id != '?' else '?'
+        st = nb.get('state', '?')
+        cost = ifc.get('cost', '?')
+        disabled = ifc.get('linkDisabled', False)
+        d = ' (DOWN)' if disabled else ''
+        iface_lines.append(f"  -> {nb_name}: {st}  cost={cost}{d}")
+    iface_text = '\n'.join(iface_lines)
+
+    diagram = f"=== {center} === (dump {fdnum})\nt={ftime:.2f}s\n{c.render()}\n{rt_text}\n\n{iface_text}"
+
+    os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    with open(out_path, 'w', encoding='utf-8') as f:
+        f.write(diagram + '\n')
+    return 1
+
+
+def process_seq(dump_path, dumps_dir, out_path):
+    """Xử lý 1 seq: vẽ topology cho tất cả router (merge mode - giữ cho single-seq)."""
     best = find_best_dumps(dumps_dir, dump_path)
     ref_name = ip2r(json.load(open(dump_path))['routerId'])
     ref_time = json.load(open(dump_path)).get('simTime', 0)
-    print(f"Thoi diem tham chieu: t={ref_time:.2f}s (file {os.path.basename(dump_path)}, router {ref_name})")
 
     all_routers = sorted(FIXED_POSITIONS.keys())
     diagrams = []
     for center in all_routers:
         if center not in best:
-            print(f"  Khong tim thay dump cho {center}")
             continue
-
         fpath, ftime, fdnum = best[center]
         lsdb, rt, ifaces, simtimes = parse_dump(fpath)
         edges = lsdb.get(center, set())
@@ -245,12 +272,116 @@ def main():
         iface_text = '\n'.join(iface_lines)
 
         marker = ' <--' if center == ref_name else ''
-        diagrams.append(f"=== {center} === (dump {fdnum}{marker})\nt={ftime:.2f}s\n{c.render()}\n{rt_text}\n\n{iface_text}")
+        diagrams.append(
+            f"=== {center} === (dump {fdnum}{marker})\n"
+            f"t={ftime:.2f}s\n{c.render()}\n{rt_text}\n\n{iface_text}"
+        )
 
-    out_path = args.output or f"topology_{os.path.splitext(os.path.basename(dump_path))[0]}.txt"
     with open(out_path, 'w', encoding='utf-8') as f:
         f.write('\n\n'.join(diagrams) + '\n')
-    print(f"Da tao {len(diagrams)} so do -> {out_path}")
+    return len(diagrams)
+
+
+def run_all(dumps_dir, out_dir, workers=8):
+    """Quét tất cả file JSON trong log/, sinh output song song ra out_dir/,
+    mirror cấu trúc thư mục: resultlog/<router>/<seq>.txt"""
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Thu thập tất cả file JSON
+    all_files = find_all_jsons(dumps_dir)
+    total = len(all_files)
+    print(f"Tìm thấy {total} file JSON. Bắt đầu sinh với {workers} worker...",
+          file=sys.stderr, flush=True)
+
+    done = [0]
+    lock = __import__('threading').Lock()
+
+    def worker(fpath):
+        # Xác định router và seq từ đường dẫn
+        # log/r1/500.json → router=r1, seq=500
+        rel = os.path.relpath(fpath, dumps_dir)
+        router_dir = os.path.dirname(rel)   # vd: "r1"
+        fname = os.path.basename(rel)        # vd: "500.json"
+        seq = os.path.splitext(fname)[0]     # vd: "500"
+        out_path = os.path.join(out_dir, router_dir, f"{seq}.txt")
+
+        if os.path.exists(out_path):
+            with lock:
+                done[0] += 1
+            return fpath, True, 0
+
+        try:
+            n = process_single_file(fpath, out_path)
+            with lock:
+                done[0] += 1
+                if done[0] % 200 == 0:
+                    print(f"  Viz: {done[0]}/{total} ({100*done[0]//total}%)",
+                          file=sys.stderr, flush=True)
+            return fpath, True, n
+        except Exception as e:
+            with lock:
+                done[0] += 1
+            return fpath, False, str(e)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(worker, fp) for fp in sorted(all_files)]
+        errors = 0
+        for f in as_completed(futures):
+            fpath, ok, info = f.result()
+            if not ok:
+                errors += 1
+                print(f"  [LỖI] {fpath}: {info}", file=sys.stderr)
+
+    print(f"  Viz done: {total} file -> {out_dir}/  (lỗi: {errors})", file=sys.stderr)
+
+
+def main():
+    p = argparse.ArgumentParser(description='Ve topology + bang dinh tuyen tu LSDB')
+    p.add_argument('dump', nargs='?')
+    p.add_argument('--latest', '-l', action='store_true')
+    p.add_argument('--list', '-L', action='store_true')
+    p.add_argument('--output', '-o')
+    p.add_argument('--all', action='store_true',
+                   help='Sinh toan bo output cho tat ca seq ra resultlog/')
+    p.add_argument('--workers', type=int, default=8,
+                   help='So worker cho --all (default: 8)')
+    args = p.parse_args()
+
+    dumps_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'log')
+    if not os.path.isdir(dumps_dir):
+        print(f"Loi: khong tim thay {dumps_dir}", file=sys.stderr); sys.exit(1)
+
+    if args.list:
+        list_dumps(dumps_dir); return
+
+    if args.all:
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'resultlog')
+        run_all(dumps_dir, out_dir, args.workers)
+        return
+
+    dump_path = None
+    if args.dump:
+        if args.dump.isdigit():
+            matched = glob.glob(os.path.join(dumps_dir, '*', f'{args.dump}.json'))
+            if not matched:
+                matched = glob.glob(os.path.join(dumps_dir, f'{args.dump}.json'))
+            if matched:
+                dump_path = matched[0]
+            else:
+                print(f"Loi: khong tim thay file co so thu tu {args.dump}", file=sys.stderr)
+                sys.exit(1)
+        else:
+            dump_path = args.dump
+    elif args.latest:
+        dump_path = max(glob.glob(os.path.join(dumps_dir, '*', '*.json')),
+                        key=lambda x: int(x.split('/')[-1].split('.')[0]))
+        print(f"Dung dump: {dump_path}")
+    else:
+        p.print_help(); return
+
+    out_path = args.output or f"topology_{os.path.splitext(os.path.basename(dump_path))[0]}.txt"
+    n = process_seq(dump_path, dumps_dir, out_path)
+    print(f"Da tao {n} so do -> {out_path}")
 
 if __name__ == '__main__':
     main()

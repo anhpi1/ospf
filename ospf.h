@@ -19,6 +19,11 @@ struct LinkFlapEvent {
     bool isDown;                // true=tắt link, false=bật link
 };
 
+// Client Send Event: tất cả router đồng loạt gửi data packet
+struct ClientSendEvent {
+    simtime_t time;             // thời điểm gửi
+};
+
 class routerOspf : public cSimpleModule
 {
     private:
@@ -35,6 +40,11 @@ class routerOspf : public cSimpleModule
         cMessage* flapTimer;
         std::set<int> blockedInterfaces;
 
+        // === Client Send Scheduler ===
+        std::vector<ClientSendEvent> clientSendEvents;
+        int clientSendRemaining;
+        cMessage* clientSendTimer;
+
 
     protected:
         virtual void initialize() override;
@@ -47,6 +57,9 @@ class routerOspf : public cSimpleModule
 
         // Debug: dump toàn bộ trạng thái router ra file JSON
         void dumpStateToJson(const char* dir = "log");
+
+        // Debug: dump payload[] của Mess ra file binary mỗi lần handleMessage
+        void dumpMessageBinary(cMessage *msg);
 
     public:
          // SPF calculation (Phase 2a)

@@ -2,7 +2,7 @@
 # OMNeT++/OMNEST Makefile for ospf
 #
 # This file was generated with the command:
-#  opp_makemake -f --deep
+#  opp_makemake -f
 #
 
 # Name of target to be created (-o option)

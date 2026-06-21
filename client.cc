@@ -9,22 +9,11 @@ void Client::initialize()
     std::string name = getName();
     routerId = std::stoi(name.substr(1));
 
-    // Schedule testTimer tại t=11.1s (sau khi SPF đã hoàn tất ở tất cả router)
-    testTimer = new cMessage("testTimer");
-    scheduleAt(simTime() + 11.1, testTimer);
+    // Client send được điều khiển qua link_flaps.txt (client send T)
 }
 
 void Client::handleMessage(cMessage *msg)
 {
-    if (msg->isSelfMessage()) {
-        if (msg == testTimer) {
-            sendTestPackets();
-            testTimer = nullptr;
-            delete msg;
-        }
-        return;
-    }
-
     // Nhận data packet từ router
     Mess* dataMsg = dynamic_cast<Mess*>(msg);
     if (dataMsg) {
@@ -41,35 +30,6 @@ void Client::handleMessage(cMessage *msg)
     delete msg;
 }
 
-void Client::sendTestPackets()
-{
-    // Generate 9 test packets (one to each router 1..10 except self)
-    for (uint32_t destId = 1; destId <= 10; destId++) {
-        if (destId == routerId) continue;
-
-        Mess* msg = new Mess("dataTest");
-        msg->setPayloadArraySize(8);
-
-        // Bytes 0-3: destination Router ID
-        msg->setPayload(0, (destId >> 24) & 0xFF);
-        msg->setPayload(1, (destId >> 16) & 0xFF);
-        msg->setPayload(2, (destId >> 8) & 0xFF);
-        msg->setPayload(3, destId & 0xFF);
-
-        // Bytes 4-7: source Router ID (self)
-        msg->setPayload(4, (routerId >> 24) & 0xFF);
-        msg->setPayload(5, (routerId >> 16) & 0xFF);
-        msg->setPayload(6, (routerId >> 8) & 0xFF);
-        msg->setPayload(7, routerId & 0xFF);
-
-        send(msg, "gate$o");
-    }
-}
-
 void Client::finish()
 {
-    if (testTimer) {
-        cancelAndDelete(testTimer);
-        testTimer = nullptr;
-    }
 }

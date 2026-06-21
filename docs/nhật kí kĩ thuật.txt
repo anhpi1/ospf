@@ -1,5 +1,4 @@
-viết ned
-viết .msg
+
 viết cấu trúc dữ liệu Router
     Ban đầu tính theo RFC: [ OSPF Header (24 byte, chung) ] [ data tùy type ]
     → 1 class message duy nhất, header validate xong rồi vấn đề là data phải là dạng void để vận chuyển dữ liệu
@@ -39,10 +38,6 @@ quyết định đổi thiết kế sang 1 message duy nhất
         bao gồm cả phần tiêu đề OSPF tiêu chuẩn.
 
 
-
-viết xử lý header
-
-
 viết lập lịch gửi gói tin hello
     Router Priority = 0 (P2P không cần DR/BDR)
 
@@ -61,25 +56,282 @@ viết lập lịch gửi gói tin hello
     - 1 hàm handleMessage() đảm nhiệm cả 2 vai trò: gửi định kỳ + nhận và xử lý gói tin.
     - Bug: gateSize("ppg") → sửa thành gateSize("gate").
 
-viết xử lý gói tin hello
+tinh gọn lại msg coi msg như là một kênh truyền vật lý chỉ dùng dể truyền dữ liệu
 
-Viết hàm in trạng thái router
+    Bối cảnh: Sau khi đổi từ nhiều message class (helloOspf, databaseDescriptionOspf,
+    linkStateUpdateOspf...) sang 1 message duy nhất, cần quyết định ranh giới giữa
+    transport và protocol logic.
 
-chạy mô phỏng xem hoạt động của hello
+    Thiết kế: OspfMess chỉ làm đúng 2 việc:
+      1. send()    — nhận type + vector<uint8_t> body → đóng headerOspf + body vào
+                    1 buffer byte → tạo Mess (cMessage con của OMNeT++) → send() qua gate.
+                     Không biết gì về nội dung body (Hello, DD, LSU...).
+      2. parse()   — nhận Mess* từ OMNeT++ → tách headerOspf + vector<uint8_t> body.
+                     Validate header (version, areaId, checksum nếu có).
+                     Không biết gì về cách xử lý body.
 
-sửa lại cấu trúc gói tin sai tùm lum :))
-  tái cấu trúc lại các cấu trúc gói tin
-  tinh gọn lại msg coi msg như là một kênh truyền vật lý chỉ dùng dể truyền dữ liệu
+    Tách biệt hoàn toàn:
+      - OspfMess (transport): chỉ đóng gói / mở gói byte, truyền qua gate.
+      - helloData, databaseDescriptionData, linkStateRequestData,
+        linkStateUpdateData, linkStateAcknowledgementData (protocol):
+        chỉ serialize / deserialize body, kiểm tra logic giao thức.
+      - routerOspf::handleMessage(): nhận body từ OspfMess::parse() → gọi
+        processXxx() tương ứng dựa vào header.type.
+
+    Lợi ích:
+      - Không ai phụ thuộc vào ai: đổi format body không ảnh hưởng send/parse.
+      - OspfMess không cần include ospf_struct.h, không biết gì về LSA, neighbor...
+      - Đúng tinh thần RFC: OSPF header là lớp vận chuyển chung cho mọi loại gói.
+      - Dễ debug: body là vector byte thuần, dễ in hex, so sánh với RFC.
 
 
-viết gửi gói tin cho bước Exstart 
 
-viết xử lý gói tin cho bước Exstart
+cơ chế ngắt link (Link Flap)
 
-tiếp tục ngồi sửa cấu trúc dữ Liệu
+    Yêu cầu: Mô phỏng đứt / khôi phục link tại thời điểm xác định, không phải
+    chạy lại mô phỏng. Cần nhẹ, không phụ thuộc framework, hoạt động được với
+    Cmdenv (không giao diện).
 
-viết cho trạng thái Exchange
+    ── Phương pháp đã chọn: Software block tại tầng OSPF ──
 
-Viết cho trạng thái loading
+    Nguyên lý: Không đụng đến gate hay channel của OMNeT++. Thay vào đó,
+    đánh dấu interface bị "khóa" và drop gói tin trước khi vào OSPF state machine.
 
-xây dựng tool debug, hiển thị trực quan state và data
+    ── Ý tưởng ──
+
+    Đọc kịch bản từ file: Mỗi router tự đọc link_flaps.txt, lọc ra sự kiện
+    có liên quan đến mình (dựa vào tên module "r1", "r2"...). Mỗi sự kiện là
+    1 bản ghi LinkFlapEvent {time, targetRouterId, isDown}.
+
+    Bất đối xứng cố ý: Chỉ chặn gói đến, không chặn gói đi. Router bị khóa
+    vẫn gửi Hello bình thường, nhưng vì đối phương cũng đánh dấu interface
+    bị khóa ở đầu kia nên Hello không được xử lý. Điều này tránh phải sửa
+    code gửi (sendHello, floodLSA...) — mọi thứ vẫn hoạt động bình thường,
+    chỉ kết quả là neighbor không nhận được gì.
+
+    Phục hồi tự nhiên: Khi link UP, blockedInterfaces xóa ifIndex, gói Hello
+    bắt đầu đến được → máy trạng thái neighbor chạy lại từ NBR_DOWN qua
+    Init → 2-Way → ExStart → Exchange → Loading → Full như bình thường,
+    không cần code đặc biệt cho việc khôi phục.
+
+    Đặc điểm:
+      - Chỉ chặn gói ĐẾN, không chặn gói ĐI. Router vẫn gửi Hello qua interface
+        bị chặn nhưng đối phương không nhận được → inactivityTimer bên kia cháy.
+      - IDNeighbor không bị xóa khi link down (giữ lại để findInterfaceByNeighbor
+        vẫn hoạt động khi flap UP sau này).
+      - Khi inactivityTimer cháy: NBR_DOWN, originate LSA mới, schedule SPF.
+      - Khi link UP trở lại: gói Hello đến được → máy trạng thái neighbor chạy
+        lại từ NBR_DOWN → ... → NBR_FULL.
+
+    ── So sánh với 2 phương pháp khác ──
+
+    1. C++ API: can thiệp trực tiếp gate/channel của OMNeT++
+       Cách làm:
+         cGate* g = gate("gate$i");
+         g->disconnect();                          // ngắt gate
+         cChannel* ch = g->getChannel();
+         ch->setDisabled(true);                    // vô hiệu hóa kênh
+         // hoặc
+         cDatarateChannel* dch = check_and_cast<cDatarateChannel*>(ch);
+         dch->setDatarate(0);                      // tốc độ = 0 → nghẽn vĩnh viễn
+
+       Ưu:
+         + Link đứt thật sự ở tầng vật lý — gói tin không thể truyền qua
+         + OMNeT++ tự hủy gói tin đang truyền dở trên kênh
+         + Không cần thêm code drop trong handleMessage
+         + Hiển thị được trên Qtenv (link chuyển màu đỏ, gạch đứt)
+
+       Nhược:
+         - Phức tạp: phải reconnect gate, restore channel parameters khi UP
+         - Mất event đang bay trên kênh (có thể gây lỗi nếu có timer đang chờ)
+         - Phụ thuộc sâu vào OMNeT++ internals (cGate, cChannel lifecycle)
+         - Mỗi gate vector phải quản lý thủ công index, khó mở rộng
+         - Khó debug: lỗi gate thường crash toàn bộ mô phỏng
+
+    2. NED configuration: dùng scenario manager hoặc XML config
+       Cách làm:
+         // omnetpp.ini
+         **.r1.gate[0].channel.disabled = true     // không hỗ trợ thay đổi runtime
+
+         // Hoặc dùng ScenarioManager (INET)
+         // scenario.xml
+         <scenario>
+           <at t="100">
+             <disconnect src-module="r1" src-gate="gate[0]"/>
+           </at>
+           <at t="200">
+             <connect src-module="r1" src-gate="gate[0]"
+                      dest-module="r2" dest-gate="gate[0]"/>
+           </at>
+         </scenario>
+
+       Ưu:
+         + Khai báo rõ ràng, không cần code C++
+         + ScenarioManager của INET xử lý toàn bộ lifecycle
+         + Tích hợp tốt với Qtenv timeline
+
+       Nhược:
+         - Cần INET framework (dự án này không dùng INET)
+         - ScenarioManager không có sẵn trong OMNeT++ base
+         - Không linh hoạt bằng code (không thể tính toán động thời điểm flap)
+         - Mỗi lần đổi kịch bản phải sửa XML, restart mô phỏng
+         - Khó tích hợp với cấu trúc gate vector của dự án
+
+
+hệ thống ghi log: cũ (state_dump) vs mới (log/)
+
+    ── Hệ thống cũ: state_dump/ ──
+
+    Định dạng: File .log văn bản, mỗi file ghi 1 sự kiện trên 1 interface
+    của 1 router. Tên file: {seq}_r{routerId}_{ifIndex}.log.
+
+    Đặc điểm:
+      - Ghi theo transition: mỗi lần trạng thái neighbor thay đổi → 1 file
+      - Nội dung là văn bản tự do (print table), không có schema cố định
+      - Mỗi file chỉ chứa thông tin của 1 interface, không có LSDB hay
+        routing table
+      - Tool phân tích phải parse tên file + regex nội dung → mong manh,
+        dễ vỡ khi thay đổi format
+      - Muốn xem toàn cảnh 10 router ở 1 thời điểm: không làm được, vì
+        mỗi router ghi log ở thời điểm khác nhau, không có simTime chung
+
+    ── Hệ thống mới: log/ ──
+
+    Quyết định then chốt: dùng JSON thay vì text tự do.
+
+    JSON không chỉ là "đổi đuôi file". Nó mang theo toàn bộ mô hình dữ liệu
+    có cấu trúc: key-value, mảng lồng nhau, kiểu dữ liệu rõ ràng (số,
+    chuỗi, bool, null). Điều này giải quyết tận gốc mọi vấn đề của text:
+
+    Thứ nhất, JSON có schema ngầm qua chính cấu trúc key:
+        "routerId": "0.0.0.1"       → luôn là IP, không thể nhầm
+        "simTime": 50.0             → luôn là số, không phải text
+        "state": { "interfaces": [  → mảng lồng, rõ ranh giới từng phần tử
+            { "index": 0, "neighbor": { "state": "NBR_FULL", ... } }
+        ] }
+      Mỗi key là 1 tên có ý nghĩa, không cần đoán vị trí cột như text table.
+      Tool không cần biết thứ tự field, chỉ cần biết tên key.
+
+    Thứ hai, JSON cho phép lồng cấu trúc phức tạp tự nhiên:
+      interfaces[] → neighbor{} → databaseSummaryList[]
+                                → linkStateRequestList[]
+                                → linkStateRetransmissionList[]
+      area → routerLSAs[] → header{}, links[] → Data[]
+      spfVertices[] → neighbors[] (đệ quy)
+      Text table không thể biểu diễn được cấu trúc lồng 3-4 tầng như trên.
+      JSON làm được — và tool python chỉ cần d['state']['area']['routerLSAs']
+      là lấy được toàn bộ LSDB.
+
+    Thứ ba, JSON miễn nhiễm với thay đổi format:
+      Thêm field mới? Chỉ cần thêm key trong C++ serialize, tool python
+      json.load() vẫn chạy bình thường, bỏ qua key lạ nếu không dùng.
+      Đổi thứ tự field? JSON không quan tâm thứ tự.
+      Text table: thêm 1 cột → vỡ toàn bộ regex.
+
+    Thứ tư, JSON là ngôn ngữ chung:
+      json.load() có sẵn trong Python stdlib, không cần thư viện ngoài.
+      Bất kỳ ngôn ngữ nào cũng có JSON parser → có thể viết tool bằng
+      Python, JavaScript, Go... đều đọc được log.
+
+    ── So sánh trực tiếp ──
+
+    |               | Cũ (state_dump)          | Mới (log/)              |
+    |---------------|--------------------------|-------------------------|
+    | Định dạng     | Text tự do (.log)        | JSON có schema (.json)  |
+    | Phạm vi       | 1 interface / file       | Toàn bộ router / file   |
+    | Tên file      | {seq}_r{id}_{if}.log     | {seq}.json              |
+    | Dữ liệu       | Chỉ neighbor state       | LSDB + routing table +  |
+    |               |                          | SPF tree + all neighbors|
+    | Tool parse    | Regex, mong manh         | json.load(), bền vững   |
+    | Lồng cấu trúc | Không (text phẳng)       | 3-4 tầng key-value      |
+    | Thêm field    | Vỡ regex, sửa tool       | Thêm key, tool cũ chạy  |
+    |               |                          | tiếp không sửa          |
+    | Tương quan    | Không có simTime chung   | simTime trong JSON →    |
+    | 10 router     |                          | quét + ghép tự động     |
+    | Đa ngôn ngữ   | Chỉ Python (regex riêng) | Bất kỳ ai có JSON parser|
+    | Chi phí I/O   | Ít (chỉ khi transition)  | Nhiều (mỗi handleMessage)|
+
+    ── Lý do đổi ──
+
+    Hệ thống cũ phù hợp giai đoạn đầu (chỉ cần trace neighbor FSM).
+    Khi cần debug SPF, routing table, LSDB, link flap — cần toàn bộ state
+    của router. JSON cho phép thêm field mới không làm vỡ tool cũ.
+    simTime trong JSON là chìa khóa để ghép 10 router về cùng 1 thời điểm.
+
+
+
+tổ chức lại hệ thống ghi log: cấu trúc thư mục phân cấp
+
+    Trước đây bin/ (~8500 file) và log/ (~11500 file) đều là flat structure —
+    tất cả file nằm trong 1 thư mục duy nhất. Gây khó quản lý khi số lượng file
+    lớn và không phản ánh được cấu trúc topology.
+
+    ── Cấu trúc mới ──
+
+    bin/
+      {router}/               ← r1..r10 (từ getName())
+        {interface}/          ← if0, if1, if2... (từ msg->getArrivalGate()->getIndex())
+          {neighbor_state}/   ← NBR_DOWN, NBR_INIT, NBR_TWOWAY, NBR_EXSTART,
+                                NBR_EXCHANGE, NBR_LOADING, NBR_FULL
+                                (từ state->interfaces[ifIndex].neighbor->state)
+            {seq:06d}_{simTime}.bin
+        client/               ← gói đến từ clientGate (không có neighbor state)
+
+    log/
+      {router}/               ← r1..r10 (từ getName())
+        {counter}.json
+
+    ── Nguyên tắc ──
+
+    Số thứ tự file (seq/counter) là mã định danh duy nhất, dùng static int
+    chia sẻ toàn cục giữa tất cả router instance. Không thay đổi cách đánh số.
+
+    Tool phân tích chỉ cần biết seq/counter, không cần biết file nằm ở
+    thư mục con nào — tìm đệ quy bằng glob **.
+
+    ── Hàm helper mkpath() ──
+
+    Thay vì mkdir() đơn (chỉ tạo 1 cấp), dùng mkpath() tạo thư mục đệ quy
+    kiểu "mkdir -p". Duyệt từng ký tự '/' trong path, cắt tạm và gọi mkdir()
+    cho từng cấp. An toàn hơn system("mkdir -p ..."), không phụ thuộc shell.
+
+    ── dumpMessageBinary() ──
+
+    Trước đây: bin/{seq:06d}_{simTime}.bin
+    Sau đây:   bin/{router}/{ifIndex}/{nbrState}/{seq:06d}_{simTime}.bin
+
+    Xác định router: getName() → "r1".."r10".
+    Xác định interface: msg->getArrivalGate()->getIndex() (chỉ số gate P2P).
+    Xác định neighbor state: nbrStateName(state->interfaces[ifIndex].neighbor->state).
+    Client data: msg->arrivedOn("clientGate$i") → thư mục client/ riêng.
+
+    ── dumpStateToJson() ──
+
+    Trước đây: log/{counter}.json
+    Sau đây:   log/{router}/{counter}.json
+
+    Đơn giản hơn: chỉ cần thêm 1 cấp thư mục router. File JSON vẫn chứa
+    toàn bộ trạng thái router như cũ, không tách theo interface.
+
+    ── Cập nhật tool phân tích ──
+
+    parse_bin.py:
+      - Glob: bin/**/{seq}_*.bin (recursive=True) → tìm được cả flat cũ lẫn
+        thư mục con mới
+      - Hiển thị thêm Router, Interface, Neighbor State từ đường dẫn thư mục
+      - Dùng: python3 tools/parse_bin.py 1032 -o parsed_1032.txt
+
+    viz_topology_ascii.py:
+      - Hàm find_all_jsons() quét cả log/*.json (flat cũ) lẫn log/*/*.json
+        (thư mục con mới)
+      - Hỗ trợ tìm theo số thứ tự: python3 tools/viz_topology_ascii.py 500
+      - Các chế độ --latest, --list, find_best_dumps đều dùng chung helper
+      - Hiển thị thêm tên thư mục router trong --list (r1/10.json)
+      - Dùng: python3 tools/viz_topology_ascii.py 500
+
+    ── Lợi ích ──
+
+    - Tổ chức rõ ràng: nhìn vào cây thư mục là thấy ngay topology và trạng thái
+    - Tìm kiếm nhanh: chỉ cần seq/counter, tool tự tìm trong toàn bộ cây
+    - Mở rộng được: thêm router, thêm interface không làm thay đổi cấu trúc
+    - Tương thích ngược: file flat cũ vẫn đọc được qua glob đệ quy

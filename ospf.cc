@@ -47,6 +47,12 @@ void routerOspf::initialize()
     flapRemaining = 0;
     flapTimer = nullptr;
     blockedInterfaces.clear();
+
+    // Initialize client send scheduler
+    clientSendEvents.clear();
+    clientSendRemaining = 0;
+    clientSendTimer = nullptr;
+
     parseLinkFlaps("link_flaps.txt");
 }
 
@@ -55,6 +61,7 @@ void routerOspf::handleMessage(cMessage *msg)
 {
     // Debug: dump state mỗi lần handleMessage được gọi
     dumpStateToJson("log");
+    dumpMessageBinary(msg);
 
     // xử lý timer
     if (msg->isSelfMessage()) {
@@ -122,6 +129,33 @@ void routerOspf::handleMessage(cMessage *msg)
                 scheduleAt(flapEvents[nextIdx].time, msg);
             } else {
                 flapTimer = nullptr;
+                delete msg;
+            }
+        } else if (msg == clientSendTimer) {
+            // Xử lý client send event: tất cả router gửi data đến nhau
+            for (uint32_t destId = 1; destId <= (uint32_t)numRouters; destId++) {
+                if (destId == routerId) continue;
+                Mess* dataMsg = new Mess("dataTest");
+                dataMsg->setPayloadArraySize(8);
+                // Bytes 0-3: destination Router ID
+                dataMsg->setPayload(0, (destId >> 24) & 0xFF);
+                dataMsg->setPayload(1, (destId >> 16) & 0xFF);
+                dataMsg->setPayload(2, (destId >> 8) & 0xFF);
+                dataMsg->setPayload(3, destId & 0xFF);
+                // Bytes 4-7: source Router ID (self)
+                dataMsg->setPayload(4, (routerId >> 24) & 0xFF);
+                dataMsg->setPayload(5, (routerId >> 16) & 0xFF);
+                dataMsg->setPayload(6, (routerId >> 8) & 0xFF);
+                dataMsg->setPayload(7, routerId & 0xFF);
+                forwardData(dataMsg, -1);  // -1 = originated locally
+            }
+            clientSendRemaining--;
+            // Schedule event kế tiếp
+            int evIdx = (int)clientSendEvents.size() - clientSendRemaining - 1;
+            if (clientSendRemaining > 0) {
+                scheduleAt(clientSendEvents[evIdx + 1].time, msg);
+            } else {
+                clientSendTimer = nullptr;
                 delete msg;
             }
         } else {
@@ -609,6 +643,10 @@ void routerOspf::finish()
         cancelAndDelete(spfTimer);
         spfTimer = nullptr;
     }
+    if (clientSendTimer) {
+        cancelAndDelete(clientSendTimer);
+        clientSendTimer = nullptr;
+    }
     for (auto& iface : state->interfaces) {
         NeighborData* nbr = iface.neighbor;
         if (nbr) {
@@ -635,26 +673,39 @@ void routerOspf::parseLinkFlaps(const char* filename)
         if (line.empty() || line[0] == '#') continue;
 
         std::istringstream iss(line);
-        std::string rA, rB, action;
-        double t;
-        if (!(iss >> rA >> rB >> action >> t)) continue;
+        std::vector<std::string> tokens;
+        std::string tok;
+        while (iss >> tok) tokens.push_back(tok);
 
-        // Lọc: có liên quan đến router này không?
-        int targetId = -1;
-        if (rA == myName)       targetId = std::stoi(rB.substr(1));
-        else if (rB == myName)  targetId = std::stoi(rA.substr(1));
-        else continue;  // không liên quan
+        if (tokens.size() == 4) {
+            // Link flap: rA rB down/up T
+            std::string rA = tokens[0], rB = tokens[1], action = tokens[2];
+            double t = std::stod(tokens[3]);
 
-        bool isDown;
-        if (action == "down")       isDown = true;
-        else if (action == "up")    isDown = false;
-        else continue;  // action không hợp lệ
+            // Lọc: có liên quan đến router này không?
+            int targetId = -1;
+            if (rA == myName)       targetId = std::stoi(rB.substr(1));
+            else if (rB == myName)  targetId = std::stoi(rA.substr(1));
+            else continue;  // không liên quan
 
-        LinkFlapEvent ev;
-        ev.time = simTime() + t;
-        ev.targetRouterId = targetId;
-        ev.isDown = isDown;
-        flapEvents.push_back(ev);
+            bool isDown;
+            if (action == "down")       isDown = true;
+            else if (action == "up")    isDown = false;
+            else continue;  // action không hợp lệ
+
+            LinkFlapEvent ev;
+            ev.time = simTime() + t;
+            ev.targetRouterId = targetId;
+            ev.isDown = isDown;
+            flapEvents.push_back(ev);
+        } else if (tokens.size() == 3 && tokens[0] == "client" && tokens[1] == "send") {
+            // Client send: client send T
+            double t = std::stod(tokens[2]);
+            ClientSendEvent ev;
+            ev.time = simTime() + t;
+            clientSendEvents.push_back(ev);
+        }
+        // Dòng không hợp lệ: bỏ qua
     }
 
     // Sort theo time
@@ -670,6 +721,17 @@ void routerOspf::parseLinkFlaps(const char* filename)
     if (flapRemaining > 0) {
         flapTimer = new cMessage("flapTimer");
         scheduleAt(flapEvents[0].time, flapTimer);
+    }
+
+    // === Client Send Events ===
+    if (!clientSendEvents.empty()) {
+        std::sort(clientSendEvents.begin(), clientSendEvents.end(),
+            [](const ClientSendEvent& a, const ClientSendEvent& b) {
+                return a.time < b.time;
+            });
+        clientSendRemaining = (int)clientSendEvents.size();
+        clientSendTimer = new cMessage("clientSendTimer");
+        scheduleAt(clientSendEvents[0].time, clientSendTimer);
     }
 }
 
@@ -1057,6 +1119,20 @@ static std::string ipToStr(uint32_t ip) {
     return oss.str();
 }
 
+// ── mkdir -p helper ──────────────────────────────────────────────
+static void mkpath(const char* path) {
+    char tmp[512];
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
 // ── serialize helpers (file-scope, forward-declared where needed) ──
 
 static void writeJson(std::ofstream& f, const LSAHeader& h, const std::string& indent) {
@@ -1239,15 +1315,18 @@ static void writeJson(std::ofstream& f, const RoutingTableEntry& e, const std::s
 
 // ── main dump function ──────────────────────────────────────────
 void routerOspf::dumpStateToJson(const char* dir) {
-    // Tạo thư mục nếu chưa có
-    mkdir(dir, 0755);
+    // Tạo thư mục log/{router}/
+    std::string rname = getName();
+    char subdir[256];
+    snprintf(subdir, sizeof(subdir), "%s/%s", dir, rname.c_str());
+    mkpath(subdir);
 
     // Tìm số thứ tự file tiếp theo
     static int counter = 0;
     counter++;
 
     char path[256];
-    snprintf(path, sizeof(path), "%s/%d.json", dir, counter);
+    snprintf(path, sizeof(path), "%s/%d.json", subdir, counter);
 
     std::ofstream f(path);
     if (!f.is_open()) {
@@ -1377,4 +1456,59 @@ void routerOspf::dumpStateToJson(const char* dir) {
     f.close();
 
     EV << "dumpStateToJson: written " << path << " (" << counter << ")\n";
+}
+
+// ── Binary packet dump ─────────────────────────────────────────
+void routerOspf::dumpMessageBinary(cMessage *msg)
+{
+    // Chỉ dump Mess* (có payload), bỏ qua self-message (timer)
+    Mess *m = dynamic_cast<Mess*>(msg);
+    if (!m) return;
+
+    std::string rname = getName();
+
+    // Xác định thư mục con dựa trên gate
+    char subdir[256];
+    if (msg->arrivedOn("clientGate$i")) {
+        snprintf(subdir, sizeof(subdir), "bin/%s/client", rname.c_str());
+    } else {
+        int ifIndex = msg->getArrivalGate()->getIndex();
+        const char* nbrSt = "NO_NBR";  // fallback an toàn
+        if (ifIndex < (int)state->interfaces.size()
+            && state->interfaces[ifIndex].neighbor) {
+            nbrSt = nbrStateName(state->interfaces[ifIndex].neighbor->state);
+        }
+        snprintf(subdir, sizeof(subdir), "bin/%s/if%d/%s",
+                 rname.c_str(), ifIndex, nbrSt);
+    }
+    mkpath(subdir);
+
+    static int counter = 0;
+    counter++;
+
+    // Định dạng simTime: thay dấu chấm bằng gạch dưới
+    char timeStr[64];
+    snprintf(timeStr, sizeof(timeStr), "%.6f", simTime().dbl());
+    for (char *p = timeStr; *p; p++)
+        if (*p == '.') *p = '_';
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%06d_%s.bin", subdir, counter, timeStr);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        EV << "dumpMessageBinary: cannot open " << path << "\n";
+        return;
+    }
+
+    // Ghi trực tiếp payload[] byte ra file
+    size_t sz = m->getPayloadArraySize();
+    for (size_t i = 0; i < sz; i++) {
+        uint8_t b = m->getPayload(i);
+        fwrite(&b, 1, 1, f);
+    }
+    fclose(f);
+
+    EV << "dumpMessageBinary: written " << path
+       << " (" << sz << " bytes)\n";
 }
