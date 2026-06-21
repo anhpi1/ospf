@@ -61,6 +61,9 @@ class routerOspf : public cSimpleModule
         // Debug: dump payload[] của Mess ra file binary mỗi lần handleMessage
         void dumpMessageBinary(cMessage *msg);
 
+        // Qtenv: cập nhật display string (màu link + text overlay)
+        void updateDisplay();
+
     public:
          // SPF calculation (Phase 2a)
         void calculateSpf();     // Dijkstra Stage 1 + Stage 2 + build routing table

@@ -102,6 +102,25 @@ python3 tools/parse_bin.py bin/r1/if0/NBR_FULL/000001_0_010000.bin
 python3 tools/parse_bin.py --all --workers 8
 ```
 
+### `tools/ospf_chart.py`
+
+Sinh HTML chart hiển thị timeline trạng thái neighbor của tất cả router. Mỗi router một hàng, màu theo trạng thái (DOWN→INIT→2WAY→EXST→EXCH→LOAD→FULL).
+
+```bash
+python3 tools/ospf_chart.py                          # mặc định đọc log/, xuất ra tools/ospf_chart.html
+python3 tools/ospf_chart.py --log-dir log -o chart.html
+```
+
+### `tools/verify_delivery.py`
+
+Kiểm tra delivery data packet giữa các cặp router. Đọc bin files, tái tạo đường đi và xác nhận gói tin đến được đích.
+
+```bash
+python3 tools/verify_delivery.py                     # ghi delivery_report.txt
+python3 tools/verify_delivery.py --list-events       # liệt kê các event group có sẵn
+python3 tools/verify_delivery.py -e 200,400          # chỉ phân tích event 200 và 400
+```
+
 ### Cấu trúc thư mục dữ liệu
 
 ```

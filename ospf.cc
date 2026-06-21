@@ -11,6 +11,52 @@
 
 Define_Module(routerOspf);
 
+// ── Qtenv display helpers ─────────────────────────────────────────
+
+static const char* nbrStateColor(unsigned int s) {
+    switch (s) {
+        case NBR_DOWN:     return "grey";
+        case NBR_INIT:     return "yellow";
+        case NBR_TWOWAY:   return "gold";
+        case NBR_EXSTART:  return "orange";
+        case NBR_EXCHANGE: return "cyan";
+        case NBR_LOADING:  return "blue";
+        case NBR_FULL:     return "green";
+        default:           return "grey";
+    }
+}
+
+static const char* pktTypeName(uint8_t type) {
+    switch (type) {
+        case 1: return "Hello";
+        case 2: return "DD";
+        case 3: return "LSR";
+        case 4: return "LSU";
+        case 5: return "LSAck";
+        default: return "?";
+    }
+}
+
+void routerOspf::updateDisplay() {
+    // (a) Màu link theo neighbor state
+    for (size_t i = 0; i < state->interfaces.size(); i++) {
+        const char* color = nbrStateColor(state->interfaces[i].neighbor->state);
+        cGate *g = gate("gate$o", i);
+        if (g->isConnected())
+            g->getDisplayString().setTagArg("ls", 0, color);
+    }
+    // (b) Text overlay
+    int full = 0;
+    for (const auto& iface : state->interfaces)
+        if (iface.neighbor && iface.neighbor->state == NBR_FULL) full++;
+    int total = (int)state->interfaces.size();
+    int lsdbN = (int)state->area.routerLSAs.size();
+    bool spfDone = !state->RoutingTable.empty();
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%s [%d/%d]\nLSDB:%d SPF:%s",
+             getName(), full, total, lsdbN, spfDone ? "Y" : "N");
+    getDisplayString().setTagArg("t", 0, buf);
+}
 
 
 void routerOspf::initialize()
@@ -79,6 +125,8 @@ void routerOspf::handleMessage(cMessage *msg)
             // Clear + tính lại
             state->RoutingTable.clear();
             calculateSpf();
+            { char tmp[64]; snprintf(tmp, sizeof(tmp), "SPF: %d vertices, %d routes",
+               (int)state->area.spfVertices.size(), (int)state->RoutingTable.size()); bubble(tmp); }
 
             // Phát hiện thay đổi (Section 12.4 Event 4)
             // So sánh thủ công vì RoutingTableEntry chưa có operator==
@@ -112,6 +160,7 @@ void routerOspf::handleMessage(cMessage *msg)
             int ifIdx = findInterfaceByNeighbor(ev.targetRouterId);
             if (ifIdx >= 0) {
                 if (ev.isDown) {
+                    { char tmp[64]; snprintf(tmp, sizeof(tmp), "Link↓ R%d", ev.targetRouterId); bubble(tmp); }
                     // 1. Chuyển neighbor → NBR_DOWN trước (để originateRouterLSA bỏ P2P link)
                     NeighborData* nbr = state->interfaces[ifIdx].neighbor;
                     if (nbr) {
@@ -134,6 +183,7 @@ void routerOspf::handleMessage(cMessage *msg)
                     state->interfaces[ifIdx].linkDisabled = true;
                 } else {
                     // Link UP: mở block trước, rồi originate LSA mới
+                    { char tmp[64]; snprintf(tmp, sizeof(tmp), "Link↑ R%d", ev.targetRouterId); bubble(tmp); }
                     blockedInterfaces.erase(ifIdx);
                     state->interfaces[ifIdx].linkDisabled = false;
                     state->originateRouterLSA();
@@ -191,6 +241,7 @@ void routerOspf::handleMessage(cMessage *msg)
                 InterfaceData* iface = &state->interfaces[i];
                 NeighborData* nbr = iface->neighbor;
                 if (nbr && nbr->inactivityTimer == msg) {
+                    { char tmp[64]; snprintf(tmp, sizeof(tmp), "R%u: Dead", nbr->IDNeighbor); bubble(tmp); }
                     nbr->inactivityTimer = nullptr;
                     nbr->state = NBR_DOWN;
                     // Khong clear IDNeighbor: giu lai de findInterfaceByNeighbor()
@@ -277,6 +328,7 @@ void routerOspf::handleMessage(cMessage *msg)
             }
             if (!found) delete msg;
         }
+        updateDisplay();
         return;
     }
 
@@ -315,6 +367,8 @@ void routerOspf::handleMessage(cMessage *msg)
         bool helloOk = helloData::processHello(hdr, data, iface, ifIndex, routerId);
 
         if (helloOk) {
+            { char tmp[64]; snprintf(tmp, sizeof(tmp), "← Hello (R%u)", hdr.routerId); bubble(tmp); }
+
             // Reset inactivity timer (Section 10.5, bước 5)
             if (nbr->inactivityTimer) {
                 cancelEvent(nbr->inactivityTimer);
@@ -332,6 +386,7 @@ void routerOspf::handleMessage(cMessage *msg)
                     event = "→2Way (2WayReceived)";
                 else if (oldState >= NBR_TWOWAY && nbr->state == NBR_INIT)
                     event = "→Init (1WayReceived)";
+                if (event) { char tmp[64]; snprintf(tmp, sizeof(tmp), "R%u: %s", hdr.routerId, event); bubble(tmp); }
             }
 
             // P2P: 2Way → ExStart ngay lập tức (Section 10.4 + 10.3)
@@ -353,6 +408,8 @@ void routerOspf::handleMessage(cMessage *msg)
 
     // Database Description packet (type=2) — ExStart + Exchange
     else if (pktType == 2) {
+        { char tmp[64]; snprintf(tmp, sizeof(tmp), "← DD (R%u)", hdr.routerId); bubble(tmp); }
+
         NeighborData* nbr = iface->neighbor;
         DdResult res = databaseDescriptionData::processDD(hdr, data, iface, routerId,
                                                            state->area.routerLSAs);
@@ -388,6 +445,7 @@ void routerOspf::handleMessage(cMessage *msg)
         // --- NegotiationDone → ExStart → Exchange (Section 10.3) ---
         if (res.negotiationDone) {
             nbr->state = NBR_EXCHANGE;
+            { char tmp[64]; snprintf(tmp, sizeof(tmp), "R%u: ExStart→Exchange", hdr.routerId); bubble(tmp); }
             if (nbr->rxmtTimer) {
                 cancelEvent(nbr->rxmtTimer);
                 delete nbr->rxmtTimer;
@@ -413,6 +471,8 @@ void routerOspf::handleMessage(cMessage *msg)
                 wasFull = true;
             } else
                 nbr->state = NBR_LOADING;
+            { char tmp[64]; snprintf(tmp, sizeof(tmp), "R%u: Exchange→%s",
+               hdr.routerId, wasFull ? "Full" : "Loading"); bubble(tmp); }
             // Cancel rxmtTimer (không còn DD)
             if (nbr->rxmtTimer) {
                 cancelEvent(nbr->rxmtTimer);
@@ -448,6 +508,8 @@ void routerOspf::handleMessage(cMessage *msg)
     // RFC 2328 Section 10.7 — Receiving Link State Request packets
     // ============================================================
     else if (pktType == 3) {
+        { char tmp[64]; snprintf(tmp, sizeof(tmp), "← LSR (R%u)", hdr.routerId); bubble(tmp); }
+
         NeighborData* nbr = iface->neighbor;
         if (nbr->state < NBR_EXCHANGE) {
             delete msg; return;  // ignore (Section 10.7)
@@ -489,6 +551,8 @@ void routerOspf::handleMessage(cMessage *msg)
     // RFC 2328 Section 13 (Flooding Procedure)
     // ============================================================
     else if (pktType == 4) {
+        { char tmp[64]; snprintf(tmp, sizeof(tmp), "← LSU (R%u)", hdr.routerId); bubble(tmp); }
+
         NeighborData* nbr = iface->neighbor;
         if (nbr->state < NBR_EXCHANGE) {
             delete msg; return;  // drop (Section 13)
@@ -529,6 +593,7 @@ void routerOspf::handleMessage(cMessage *msg)
         // LoadingDone? (Section 10.3)
         if (nbr->state == NBR_LOADING && lsuRes.loadingDone) {
             nbr->state = NBR_FULL;
+            { char tmp[64]; snprintf(tmp, sizeof(tmp), "R%u: Loading→Full", hdr.routerId); bubble(tmp); }
             if (nbr->rxmtTimer) {
                 cancelEvent(nbr->rxmtTimer);
                 delete nbr->rxmtTimer; nbr->rxmtTimer = nullptr;
@@ -586,6 +651,8 @@ void routerOspf::handleMessage(cMessage *msg)
     // RFC 2328 Section 13.7 (Receiving link state acknowledgments)
     // ============================================================
     else if (pktType == 5) {
+        { char tmp[64]; snprintf(tmp, sizeof(tmp), "← LSAck (R%u)", hdr.routerId); bubble(tmp); }
+
         NeighborData* nbr = iface->neighbor;
 
         // Pre-check: neighbor >= Exchange? (Section 13.7)
@@ -652,12 +719,15 @@ void routerOspf::handleMessage(cMessage *msg)
         return; // forwardData handles send/delete; don't fall to delete msg
     }
 
+    updateDisplay();
     delete msg;
 
 }
 
 void routerOspf::finish()
 {
+    updateDisplay();
+
     // Cleanup flapTimer
     if (flapTimer) {
         cancelAndDelete(flapTimer);

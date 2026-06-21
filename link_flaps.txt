@@ -1,1 +1,110 @@
-client send 300
+# ============================================================
+# Kịch bản mô phỏng OSPF - Link Flap + Client Send
+# Mỗi step cách nhau 100s để mạng kịp phản ứng
+# (HelloInterval=10s, RouterDeadInterval=40s)
+# ============================================================
+
+# === GĐ 0: Khởi động (0-100s) ===
+# Mạng tự động: Hello → DD → LSR → LSU → Full → SPF → Routing Table
+# Tất cả 12 link up, 10 router đạt NBR_FULL
+
+# ============================================================
+# Case 1: SINGLE LINK FAILURE - KHÔNG CRITICAL (t=100s)
+# Mục tiêu: Xác nhận SPF tính lại đường thay thế khi 1 link đứt.
+# R1-R2 down: R1 vẫn đến được R2 qua R1→R4→R2 hoặc R1→R4→R5→R2
+# ============================================================
+r1 r2 down 100
+
+# ============================================================
+# Case 1b: CLIENT SEND sau single failure (t=200s)
+# Mục tiêu: Xác nhận data plane hoạt động với đường thay thế.
+# Tất cả router vẫn reachable, không có partition.
+# ============================================================
+client send 200
+
+# ============================================================
+# Case 2: DOUBLE FAILURE → PARTITION (t=300s)
+# Mục tiêu: Xác nhận mạng phát hiện partition và cập nhật LSDB.
+# Tắt R2-R3 + R3-R9 cùng lúc:
+#   - R3 chỉ còn R3-R8
+#   - R8 chỉ còn R3-R8 + R8-R10
+#   - {R3, R8, R10} thành đảo biệt lập
+#   - Phần chính {R1,R2,R4,R5,R6,R7,R9} không đến được R3,R8,R10
+# ============================================================
+r2 r3 down 300
+r3 r9 down 300
+
+# ============================================================
+# Case 2b: CLIENT SEND khi mạng bị chia cắt (t=400s)
+# Mục tiêu: Xác nhận gói tin giữa 2 partition thất bại,
+# nhưng gói nội bộ mỗi partition vẫn delivery được.
+# ============================================================
+client send 400
+
+# ============================================================
+# Case 3: LEAF ISOLATION (t=500s)
+# Mục tiêu: Xác nhận xử lý khi leaf node mất kết nối duy nhất.
+# R4-R6 down → R6 cô lập (chỉ có 1 link)
+# R8-R10 down → R10 cô lập (đảo {R3,R8} mất R10)
+# Phần chính: R6 unreachable. Đảo {R3,R8}: R10 unreachable.
+# ============================================================
+r4 r6 down 500
+r8 r10 down 500
+
+# ============================================================
+# Case 3b: CLIENT SEND khi leaf bị cô lập (t=600s)
+# Mục tiêu: Xác nhận R6, R10 hoàn toàn unreachable.
+# R3,R8 vẫn reachable trong đảo của chúng.
+# ============================================================
+client send 600
+
+# ============================================================
+# Case 4: PARTIAL RECOVERY - HÀN GẮN PARTITION (t=700s)
+# Mục tiêu: Xác nhận khi bật lại 1 link, đảo tái nhập mạng.
+# Bật R3-R9 → đảo {R3,R8} nối lại partition chính qua R9.
+# R10 vẫn unreachable (R8-R10 vẫn down).
+# ============================================================
+r3 r9 up 700
+
+# ============================================================
+# Case 4b: CLIENT SEND sau hàn gắn partition (t=800s)
+# Mục tiêu: R3,R8 reachable trở lại từ partition chính.
+# R10 vẫn unreachable, R6 vẫn unreachable.
+# ============================================================
+client send 800
+
+# ============================================================
+# Case 5: FULL RECOVERY (t=900s)
+# Mục tiêu: Xác nhận mạng trở về trạng thái hoàn chỉnh.
+# Bật tất cả link còn lại.
+# ============================================================
+r1 r2 up 900
+r2 r3 up 900
+r4 r6 up 900
+r8 r10 up 900
+
+# ============================================================
+# Case 5b: CLIENT SEND sau phục hồi hoàn toàn (t=1000s)
+# Mục tiêu: Tất cả 10 router reachable. Routing table giống ban đầu.
+# ============================================================
+client send 1000
+
+# ============================================================
+# Case 6: SINGLE LINK Ở NHÁNH KHÁC (t=1100s)
+# Mục tiêu: Xác nhận SPF hoạt động với link ở vị trí khác.
+# R4-R5 down: bridge giữa 2 nhánh dưới, nhưng không critical
+# vì R4→R2→R5 là đường thay thế.
+# ============================================================
+r4 r5 down 1100
+
+# ============================================================
+# Case 6b: CLIENT SEND (t=1200s)
+# ============================================================
+client send 1200
+
+# ============================================================
+# Case 7: PHỤC HỒI + CLIENT SEND CUỐI (t=1300s)
+# Mục tiêu: Xác nhận mạng ổn định sau tất cả thay đổi.
+# ============================================================
+r4 r5 up 1300
+client send 1300

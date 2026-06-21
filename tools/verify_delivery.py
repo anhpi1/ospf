@@ -6,12 +6,12 @@ verify_delivery.py — Kiểm tra delivery data packets từ bin/ và log/
 và kiểm tra delivery cho từng cặp (src, dest) tại mỗi event group.
 
 Usage:
-  python3 tools/verify_delivery.py
-  python3 tools/verify_delivery.py --events 100,300
-  python3 tools/verify_delivery.py --events 100,300 > report.txt
+  python3 tools/verify_delivery.py                  # ghi delivery_report.txt
+  python3 tools/verify_delivery.py --events 200,400 # lọc event 200, 400
 """
 
 import argparse
+import contextlib
 import glob
 import os
 import struct
@@ -200,7 +200,7 @@ def find_event_groups(bin_dir='bin'):
     return sorted(events)
 
 
-def print_report(data_packets, event_filter=None, num_routers=10):
+def print_report(data_packets, event_filter=None, num_routers=10, out=sys.stdout):
     """In báo cáo phân tích delivery."""
     expected_pairs = num_routers * (num_routers - 1)  # 10 * 9 = 90
 
@@ -339,8 +339,13 @@ def main():
         print("\nKhông tìm thấy event group nào. Kiểm tra --events hoặc --bin-dir.")
         return
 
-    # In báo cáo
-    print_report(data_packets, event_filter)
+    # Ghi tất cả event vào 1 file
+    outfile = 'delivery_report.txt'
+    with open(outfile, 'w', encoding='utf-8') as f:
+        with contextlib.redirect_stdout(f):
+            print_report(data_packets, event_filter)
+
+    print(f"Đã ghi báo cáo vào '{outfile}' ({os.path.getsize(outfile)} bytes)")
 
 
 if __name__ == '__main__':

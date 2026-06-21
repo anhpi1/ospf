@@ -1,0 +1,199 @@
+version 3
+run General-0-20260622-00:10:12-627172
+attr configname General
+attr datetime 20260622-00:10:12
+attr datetimef 20260622-001012
+attr experiment General
+attr inifile omnetpp.ini
+attr iterationvars ""
+attr iterationvarsd ""
+attr iterationvarsf ""
+attr measurement ""
+attr network Ospf
+attr processid 627172
+attr repetition 0
+attr replication #0
+attr resultdir results
+attr runnumber 0
+attr seedset 0
+config sim-time-limit 1400s
+config network Ospf
+config sim-time-limit 1400s
+config record-eventlog true
+
+par Ospf.r1.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r1.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r1.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r2.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r2.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r2.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r1.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r1.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r1.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r4.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r4.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r4.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r2.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r2.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r2.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r3.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r3.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r3.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r2.gate$o[2].channel typename "\"ned.DelayChannel\""
+par Ospf.r2.gate$o[2].channel disabled false
+attr mutable ""
+par Ospf.r2.gate$o[2].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r4.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r4.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r4.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r2.gate$o[3].channel typename "\"ned.DelayChannel\""
+par Ospf.r2.gate$o[3].channel disabled false
+attr mutable ""
+par Ospf.r2.gate$o[3].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r5.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r5.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r5.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r3.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r3.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r3.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r8.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r8.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r8.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r3.gate$o[2].channel typename "\"ned.DelayChannel\""
+par Ospf.r3.gate$o[2].channel disabled false
+attr mutable ""
+par Ospf.r3.gate$o[2].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r9.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r9.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r9.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r4.gate$o[2].channel typename "\"ned.DelayChannel\""
+par Ospf.r4.gate$o[2].channel disabled false
+attr mutable ""
+par Ospf.r4.gate$o[2].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r5.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r5.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r5.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r4.gate$o[3].channel typename "\"ned.DelayChannel\""
+par Ospf.r4.gate$o[3].channel disabled false
+attr mutable ""
+par Ospf.r4.gate$o[3].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r6.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r6.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r6.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r5.gate$o[2].channel typename "\"ned.DelayChannel\""
+par Ospf.r5.gate$o[2].channel disabled false
+attr mutable ""
+par Ospf.r5.gate$o[2].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r7.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r7.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r7.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r5.gate$o[3].channel typename "\"ned.DelayChannel\""
+par Ospf.r5.gate$o[3].channel disabled false
+attr mutable ""
+par Ospf.r5.gate$o[3].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r9.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r9.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r9.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r8.gate$o[1].channel typename "\"ned.DelayChannel\""
+par Ospf.r8.gate$o[1].channel disabled false
+attr mutable ""
+par Ospf.r8.gate$o[1].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r10.gate$o[0].channel typename "\"ned.DelayChannel\""
+par Ospf.r10.gate$o[0].channel disabled false
+attr mutable ""
+par Ospf.r10.gate$o[0].channel delay 0.01s
+attr mutable ""
+attr unit s
+par Ospf.r1 typename "\"routerOspf\""
+par Ospf.r1 numRouters 10
+par Ospf.r2 typename "\"routerOspf\""
+par Ospf.r2 numRouters 10
+par Ospf.r3 typename "\"routerOspf\""
+par Ospf.r3 numRouters 10
+par Ospf.r4 typename "\"routerOspf\""
+par Ospf.r4 numRouters 10
+par Ospf.r5 typename "\"routerOspf\""
+par Ospf.r5 numRouters 10
+par Ospf.r6 typename "\"routerOspf\""
+par Ospf.r6 numRouters 10
+par Ospf.r7 typename "\"routerOspf\""
+par Ospf.r7 numRouters 10
+par Ospf.r8 typename "\"routerOspf\""
+par Ospf.r8 numRouters 10
+par Ospf.r9 typename "\"routerOspf\""
+par Ospf.r9 numRouters 10
+par Ospf.r10 typename "\"routerOspf\""
+par Ospf.r10 numRouters 10
+par Ospf.c1 typename "\"Client\""
+par Ospf.c2 typename "\"Client\""
+par Ospf.c3 typename "\"Client\""
+par Ospf.c4 typename "\"Client\""
+par Ospf.c5 typename "\"Client\""
+par Ospf.c6 typename "\"Client\""
+par Ospf.c7 typename "\"Client\""
+par Ospf.c8 typename "\"Client\""
+par Ospf.c9 typename "\"Client\""
+par Ospf.c10 typename "\"Client\""
+par Ospf typename "\"Ospf\""
+

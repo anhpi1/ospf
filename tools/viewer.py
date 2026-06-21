@@ -30,15 +30,15 @@ HTML = r"""<!DOCTYPE html>
 <title>OSPF Tools Viewer</title>
 <style>
   :root {
-    --bg: #1a1a2e;
-    --surface: #16213e;
-    --primary: #0f3460;
-    --accent: #e94560;
-    --text: #eee;
-    --text-dim: #999;
-    --border: #333;
-    --pre-bg: #0d1117;
-    --btn-hover: #1a5276;
+    --bg: #f5f5f5;
+    --surface: #ffffff;
+    --primary: #e0e0e0;
+    --accent: #1976d2;
+    --text: #222;
+    --text-dim: #666;
+    --border: #ccc;
+    --pre-bg: #fafafa;
+    --btn-hover: #bbdefb;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
@@ -106,7 +106,7 @@ HTML = r"""<!DOCTYPE html>
   .btn-prev { background: var(--primary); }
   .btn-next { background: var(--primary); }
   .btn-run  { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn:hover { filter: brightness(1.2); }
+  .btn:hover { filter: brightness(0.95); }
   .btn:active { filter: brightness(0.9); }
   .status {
     font-size: 0.8rem;
@@ -114,8 +114,8 @@ HTML = r"""<!DOCTYPE html>
     margin-left: auto;
     white-space: nowrap;
   }
-  .status.error { color: #f88; }
-  .status.ok { color: #8f8; }
+  .status.error { color: #c62828; }
+  .status.ok { color: #2e7d32; }
   main {
     flex: 1;
     overflow: auto;
@@ -123,7 +123,7 @@ HTML = r"""<!DOCTYPE html>
   }
   pre {
     background: var(--pre-bg);
-    color: #c9d1d9;
+    color: #333;
     padding: 16px;
     margin: 0;
     min-height: 100%;
