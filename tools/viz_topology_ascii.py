@@ -39,14 +39,26 @@ def parse_dump(path):
     simtimes[name] = router_obj.get('simTime', 0)
 
     # LSDB: state.area.routerLSAs
-    edges = set()
+    # p2p_map: adv_router → set of P2P neighbor IDs (để kiểm tra 2 chiều)
+    p2p_map = {}  # "R1" → {"R2", "R4"}
     for lsa in router_obj.get('state', {}).get('area', {}).get('routerLSAs', []):
         if lsa.get('header', {}).get('type') != 1:
             continue
         adv = ip2r(lsa['header']['advertisingRouter'])
+        p2p_set = set()
         for link in lsa.get('links', []):
             if link.get('type') == 'LINK_P2P':
-                edges.add(tuple(sorted((adv, ip2r(link['linkID'])))))
+                nb = ip2r(link['linkID'])
+                p2p_set.add(nb)
+        p2p_map[adv] = p2p_set
+
+    # Xây edges từ LSDB: chỉ giữ link nếu CẢ 2 phía cùng xác nhận (bidirectional)
+    edges = set()
+    for adv, neighbors in p2p_map.items():
+        for nb in neighbors:
+            # Kiểm tra bidirectional: nb cũng phải có P2P link đến adv
+            if nb in p2p_map and adv in p2p_map[nb]:
+                edges.add(tuple(sorted((adv, nb))))
     lsdb[name] = edges
 
     # Routing table: state.routingTable
@@ -129,6 +141,10 @@ def fmt_rt(entries):
         # Xử lý cả format cũ (số) và format mới (chuỗi 'R'/'N')
         if isinstance(tp, int):
             tp = chr(tp) if tp in (78, 82) else str(tp)
+        # Bỏ qua route type N (network) — các interface chưa có IP riêng
+        # nên network route trùng với router ID, gây nhiễu
+        if tp == 'N':
+            continue
         dst = fmt_dst(e.get('destinationId', '?'), tp)
         cost = e.get('cost', '?')
         nh = fmt_nh(e.get('nextHop', '?'))

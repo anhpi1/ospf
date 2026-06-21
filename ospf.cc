@@ -112,11 +112,37 @@ void routerOspf::handleMessage(cMessage *msg)
             int ifIdx = findInterfaceByNeighbor(ev.targetRouterId);
             if (ifIdx >= 0) {
                 if (ev.isDown) {
+                    // 1. Chuyển neighbor → NBR_DOWN trước (để originateRouterLSA bỏ P2P link)
+                    NeighborData* nbr = state->interfaces[ifIdx].neighbor;
+                    if (nbr) {
+                        nbr->state = NBR_DOWN;
+                        nbr->databaseSummaryList.clear();
+                        nbr->linkStateRequestList.clear();
+                        nbr->linkStateRetransmissionList.clear();
+                    }
+                    // 2. Originate + flood LSA mới TRƯỚC KHI block interface
+                    //    (để router còn interface hoạt động có thể flood ra ngoài)
+                    state->originateRouterLSA();
+                    for (auto& lsa : state->area.routerLSAs) {
+                        if (lsa.header.advertisingRouter == routerId) {
+                            linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
+                            break;
+                        }
+                    }
+                    // 3. Block interface sau khi đã flood
                     blockedInterfaces.insert(ifIdx);
                     state->interfaces[ifIdx].linkDisabled = true;
                 } else {
+                    // Link UP: mở block trước, rồi originate LSA mới
                     blockedInterfaces.erase(ifIdx);
                     state->interfaces[ifIdx].linkDisabled = false;
+                    state->originateRouterLSA();
+                    for (auto& lsa : state->area.routerLSAs) {
+                        if (lsa.header.advertisingRouter == routerId) {
+                            linkStateUpdateData::floodLSA(lsa, -1, *state, routerId, this);
+                            break;
+                        }
+                    }
                 }
             } else {
             }

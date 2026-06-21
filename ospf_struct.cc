@@ -94,8 +94,10 @@ void OspfRouterState::originateRouterLSA()
     for (size_t i = 0; i < interfaces.size(); i++) {
         InterfaceData* iface = &interfaces[i];
 
-        // Down → bỏ qua (Section 12.4.1)
+        // Down hoặc bị disable → bỏ qua (Section 12.4.1)
         if (iface->state == IF_DOWN)
+            continue;
+        if (iface->linkDisabled)
             continue;
 
         // Loopback → Type 3 stub với host route đến chính mình (Section 12.4.1)
