@@ -167,14 +167,18 @@ def build_echarts_option(timeline):
         },
         "legend": {
             "type": "scroll",
-            "orient": "horizontal",
-            "bottom": 0,
+            "orient": "vertical",
+            "right": 0,
+            "top": 50,
+            "bottom": 50,
+            "itemWidth": 20,
+            "itemHeight": 10,
             "data": legend_data,
             "textStyle": {"fontSize": 10}
         },
         "grid": {
             "left": 100,
-            "right": 80,
+            "right": 200,
             "top": 50,
             "bottom": 60
         },
